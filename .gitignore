@@ -11,3 +11,7 @@ dist/
 dist-ssr/
 *.local
 *.log
+
+# Old static mockup, kept locally for reference only — not part of the repo
+/legacy-static/
+/images/
