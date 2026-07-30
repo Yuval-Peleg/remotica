@@ -1,0 +1,13 @@
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/extensions.json
+.idea
+
+# Node (safety net — frontend/ has its own .gitignore too)
+node_modules/
+dist/
+dist-ssr/
+*.local
+*.log

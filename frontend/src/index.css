@@ -1,0 +1,78 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
+
+/* Remotica brand tokens — sage-green-on-black, carried over from the original design */
+:root {
+  --brand-from: #b2c9ad;
+  --brand-to: #4b5945;
+
+  --background: #1b1c1a;
+  --foreground: #e7e7e2;
+  --card: #242524;
+  --card-foreground: #e7e7e2;
+  --popover: #242524;
+  --popover-foreground: #e7e7e2;
+  --primary: #6b8f63;
+  --primary-foreground: #10130f;
+  --secondary: #33352f;
+  --secondary-foreground: #e7e7e2;
+  --muted: #2a2b28;
+  --muted-foreground: #9aa896;
+  --accent: #3a4a37;
+  --accent-foreground: #d7e4d2;
+  --destructive: #d64545;
+  --destructive-foreground: #fdf2f2;
+  --border: #33352f;
+  --input: #33352f;
+  --ring: #6b8f63;
+  --radius: 0.65rem;
+}
+
+@theme inline {
+  --font-sans: "Kumbh Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-heading: var(--font-sans);
+  --color-brand-from: var(--brand-from);
+  --color-brand-to: var(--brand-to);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+}
+
+body {
+  margin: 0;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+  html {
+    @apply font-sans;
+  }
+}
