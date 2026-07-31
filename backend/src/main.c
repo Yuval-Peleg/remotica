@@ -17,8 +17,10 @@
  *   5. Start a background thread that "ticks" the driver and job manager
  *      forward and pushes fresh state to every connected browser, over
  *      and over, until the program is told to stop (Ctrl+C).
- *   6. On shutdown, stop the tick thread, disconnect the driver, and
- *      shut civetweb down cleanly.
+ *   6. On shutdown, tear everything down in the reverse of the order it
+ *      was started: tick thread, then civetweb, then any running print,
+ *      and only then the printer connection itself (see the comment on
+ *      that block for why that order specifically).
  */
 
 /* See the identical comment in transport_serial.c: -std=c99 hides some
@@ -209,14 +211,28 @@ int main(int argc, char **argv) {
      * tear anything down out from under it. */
     pthread_join(tick_thread, NULL);
 
-    /* Stop any in-progress print streaming thread before disconnecting
-     * the driver — otherwise it could still be mid-way through sending
-     * that thread a line (e.g. writing to the serial fd) at the exact
-     * moment disconnect() closes it out from under it. */
-    job_manager_shutdown();
-
-    driver->disconnect(driver);
+    /* Order matters here, and it's the reverse of the order things were
+     * started in — every thread that can touch the driver has to be gone
+     * before the driver's connection is torn down.
+     *
+     * 1. mg_stop() first: until it returns, civetweb's worker threads are
+     *    still alive and still serving requests, so a jog/home/temp
+     *    request could be sitting inside the driver right now. Closing
+     *    the serial fd underneath it would mean writing to a closed
+     *    descriptor — or worse, to whatever unrelated file happens to be
+     *    opened next and given the same descriptor number. mg_stop()
+     *    waits for in-flight requests to finish, so this can pause for a
+     *    moment if e.g. a home command is still running; that pause is
+     *    the point, not a bug.
+     * 2. job_manager_shutdown(): asks any in-progress print streaming
+     *    thread to stop and blocks until it actually has (it may spend a
+     *    couple of seconds sending its heaters-off safety sequence
+     *    first — see send_abort_safety_sequence in job_manager.c).
+     * 3. Only now is nothing else using the connection, so it's safe to
+     *    close. */
     mg_stop(ctx);
+    job_manager_shutdown();
+    driver->disconnect(driver);
     mg_exit_library();
 
     if (serial_device != NULL) {

@@ -43,7 +43,13 @@
  * you pick a file (see GcodeDropzone.jsx), just now reflected on the
  * backend's shared state too.
  *
- * Returns 0 on success, -1 on failure (bad filename, or a disk error). */
+ * Refuses (returns -1, writing nothing to disk) while a print is running
+ * or paused: an upload both replaces the queued job — which the streamer
+ * thread reads as "someone cancelled me" and would stop the print dead —
+ * and could truncate the exact file that print is being streamed from.
+ *
+ * Returns 0 on success, -1 on failure (bad filename, a print in
+ * progress, or a disk error). */
 int job_manager_save_upload(PrinterState *state, const char *uploads_dir, const char *filename,
                             const char *body, size_t body_len);
 
@@ -60,7 +66,13 @@ int job_manager_start_print(PrinterState *state, PrinterDriver *driver, const ch
  * "clear", matching there being no separate "remove file" endpoint yet.
  * If a print streaming thread is currently running, it notices the
  * cancellation and stops on its own (see streamer_thread_main) — this
- * function does not block waiting for that to happen. */
+ * function does not block waiting for that to happen. That thread also
+ * takes care of leaving the printer safe on its way out (heaters and fan
+ * off, a small Z lift, steppers disabled — see
+ * send_abort_safety_sequence), which is why that isn't done here: the
+ * driver only handles one conversation at a time, and the streamer may
+ * still be waiting on the previous line's acknowledgement at the moment
+ * this returns. */
 void job_manager_cancel_print(PrinterState *state);
 
 /* Pauses an in-progress print (JOB_STATUS_PRINTING -> JOB_STATUS_PAUSED),
@@ -117,7 +129,9 @@ int job_manager_file_exists(const char *uploads_dir, const char *filename);
 /* Marks an already-uploaded file as the queued job (JOB_STATUS_READY),
  * without re-uploading it — used by the "on device" file browser's
  * "print this again" action. Returns 0 on success, -1 if the file
- * doesn't exist on disk or the filename is unsafe. */
+ * doesn't exist on disk, the filename is unsafe, or a print is currently
+ * running or paused (same reasoning as job_manager_save_upload above:
+ * changing the queued job mid-print silently kills the print). */
 int job_manager_select_existing(PrinterState *state, const char *uploads_dir, const char *filename);
 
 /* Deletes a file from uploads_dir. Refuses (returns -1) if that file is

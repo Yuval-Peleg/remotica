@@ -19,6 +19,14 @@
  * runs the first few commands, keep a hand near the power switch, and
  * don't leave it unattended until you've seen it behave correctly.
  *
+ * Threading: every PrinterDriver function this file provides is safe to
+ * call from any thread, and they really are called from three of them
+ * (civetweb's HTTP workers, the shared tick thread, and the print
+ * streamer thread) — a single mutex inside the driver serialises the
+ * whole send-command-then-wait-for-"ok" exchange, because a serial port
+ * is one sequential conversation and two overlapping exchanges corrupt
+ * each other. See the io_lock comment in transport_serial.c.
+ *
  * How to use this instead of the simulator: run the backend with
  * `--serial /dev/ttyUSB0` (or whatever your printer's device path is —
  * see main.c). Without that flag, the simulator (transport_sim.h) is used

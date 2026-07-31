@@ -154,6 +154,67 @@ static long count_printable_lines(FILE *file) {
     return count;
 }
 
+/* Why a print stopped early, if it did. */
+typedef enum {
+    ABORT_NONE = 0,      /* the file was streamed to the end */
+    ABORT_CANCELLED,     /* a cancel/shutdown request, or the job status changed under us */
+    ABORT_DRIVER_FAILURE /* the printer stopped acknowledging lines */
+} AbortReason;
+
+/* Leaves the printer in a safe state after a print stops early.
+ *
+ * This matters more than it might look: without it, cancelling a print
+ * (or losing the printer mid-print) stops sending file lines and does
+ * nothing else — hotend and bed stay at full print temperature
+ * indefinitely, the part cooling fan keeps running, and the nozzle sits
+ * parked against the (still molten) top surface of the part, slowly
+ * melting a crater into it. Heaters off first, because an unattended
+ * heater is the only part of that list that's an actual hazard rather
+ * than a ruined print.
+ *
+ * Deliberately called from the streamer thread itself, never from
+ * job_manager_cancel_print()'s HTTP-handler thread: the driver expects
+ * one conversation at a time, and the streamer may still be blocked
+ * waiting for the previous line's acknowledgement when the cancel
+ * arrives.
+ *
+ * Every line is best-effort — if the printer has already stopped
+ * answering there's nothing to be done about it, and we specifically
+ * must not spend an ack timeout per line discovering that seven times
+ * over, since job_manager_shutdown() blocks on this thread finishing
+ * and that delay would land directly on Ctrl+C. So if the printer
+ * doesn't acknowledge the heater-off commands, the rest is skipped. */
+static void send_abort_safety_sequence(PrinterDriver *driver) {
+    static const char *const heaters_off[] = {
+        "M104 S0", /* hotend off */
+        "M140 S0", /* bed off */
+        "M107",    /* part cooling fan off */
+    };
+    static const char *const park_and_release[] = {
+        "G91",        /* relative positioning, just for the lift below */
+        "G1 Z5 F600", /* lift 5mm so the nozzle isn't resting on the part */
+        "G90",        /* back to absolute — never leave modal state changed */
+        "M84",        /* disable steppers (also lets the bed be moved by hand) */
+    };
+
+    int printer_responding = 1;
+    for (size_t i = 0; i < sizeof(heaters_off) / sizeof(heaters_off[0]); i++) {
+        if (driver->send_gcode_line(driver, heaters_off[i]) != 0) {
+            printer_responding = 0;
+        }
+    }
+
+    if (!printer_responding) {
+        return;
+    }
+
+    for (size_t i = 0; i < sizeof(park_and_release) / sizeof(park_and_release[0]); i++) {
+        if (driver->send_gcode_line(driver, park_and_release[i]) != 0) {
+            return;
+        }
+    }
+}
+
 /* The body of the print-streaming background thread launched by
  * job_manager_start_print(). Reads `args->path` line by line and hands
  * each real gcode line to the driver, tracking progress on `args->state`
@@ -181,7 +242,7 @@ static void *streamer_thread_main(void *arg) {
     }
 
     long sent_lines = 0;
-    int aborted = 0;
+    AbortReason abort_reason = ABORT_NONE;
     char raw_line[GCODE_LINE_BUF_SIZE];
 
     while (fgets(raw_line, sizeof(raw_line), file) != NULL) {
@@ -213,7 +274,7 @@ static void *streamer_thread_main(void *arg) {
         int cancel = s_streamer.cancel_requested;
         pthread_mutex_unlock(&s_streamer.mutex);
         if (cancel) {
-            aborted = 1;
+            abort_reason = ABORT_CANCELLED;
             break;
         }
 
@@ -223,7 +284,7 @@ static void *streamer_thread_main(void *arg) {
         if (status != JOB_STATUS_PRINTING) {
             /* Job was cancelled (or otherwise moved on) through some
              * other path while we were between lines. */
-            aborted = 1;
+            abort_reason = ABORT_CANCELLED;
             break;
         }
 
@@ -233,7 +294,7 @@ static void *streamer_thread_main(void *arg) {
              * silently dropping a motion or temperature command could
              * leave a real printer in a genuinely bad physical state
              * (head crashed into the bed, heater left on, ...). */
-            aborted = 1;
+            abort_reason = ABORT_DRIVER_FAILURE;
             break;
         }
 
@@ -245,17 +306,34 @@ static void *streamer_thread_main(void *arg) {
 
     fclose(file);
 
+    if (abort_reason != ABORT_NONE) {
+        /* Stopped early, one way or another — don't leave the printer
+         * cooking the part it was half-way through. */
+        send_abort_safety_sequence(driver);
+    }
+
     printer_state_lock(state);
-    if (!aborted) {
+    if (abort_reason == ABORT_NONE) {
         state->job.progress_percent = 100.0;
         /* "Finished" printing: go back to READY rather than IDLE, so the
          * same file is still queued and could be printed again without
          * re-uploading it. */
         state->job.status = JOB_STATUS_READY;
+    } else if (abort_reason == ABORT_DRIVER_FAILURE) {
+        /* Nothing else has touched the job status on this path (unlike a
+         * cancel, where job_manager_cancel_print already set
+         * JOB_STATUS_IDLE), so without this the job would sit at
+         * JOB_STATUS_PRINTING forever with a frozen progress bar and no
+         * thread behind it. READY — the same place a completed print
+         * lands — is the recoverable choice: the file stays queued so it
+         * can simply be started again once the printer is back, and the
+         * frontend already knows how to display that status. The
+         * progress percentage is deliberately left where it stopped, as
+         * a hint of how far the print got before the printer went away. */
+        state->job.status = JOB_STATUS_READY;
     }
-    /* If aborted, leave state->job exactly as whatever cancelled it left
-     * it (job_manager_cancel_print already set JOB_STATUS_IDLE) — nothing
-     * to do here. */
+    /* Cancelled: leave state->job exactly as whatever cancelled it left
+     * it (job_manager_cancel_print already set JOB_STATUS_IDLE). */
     printer_state_unlock(state);
 
     pthread_mutex_lock(&s_streamer.mutex);
@@ -266,9 +344,35 @@ static void *streamer_thread_main(void *arg) {
     return NULL;
 }
 
+/* True if a print is currently running or paused — i.e. the streamer
+ * thread is alive and reading a file that the caller must not pull out
+ * from under it. Same guard job_manager_delete_file has always had;
+ * upload and select need it just as much (see their call sites). */
+static int print_is_active(PrinterState *state) {
+    printer_state_lock(state);
+    int active =
+        (state->job.status == JOB_STATUS_PRINTING || state->job.status == JOB_STATUS_PAUSED);
+    printer_state_unlock(state);
+    return active;
+}
+
 int job_manager_save_upload(PrinterState *state, const char *uploads_dir, const char *filename,
                             const char *body, size_t body_len) {
     if (!is_safe_filename(filename)) {
+        return -1;
+    }
+
+    /* Checked BEFORE anything is written to disk, not just before the
+     * job fields are updated: an upload of the same name would truncate
+     * the very file the streamer thread currently has open and is
+     * reading from, and the rest of the print would be streamed from
+     * whatever the new bytes happen to be. (Strictly this is a
+     * check-then-act race, but a print can only ever start from
+     * JOB_STATUS_READY via job_manager_start_print, so the window can't
+     * be hit by anything except two requests racing each other by
+     * microseconds — and the job-status assignment below is the real
+     * point of no return either way.) */
+    if (print_is_active(state)) {
         return -1;
     }
 
@@ -300,6 +404,18 @@ int job_manager_save_upload(PrinterState *state, const char *uploads_dir, const 
 }
 
 int job_manager_start_print(PrinterState *state, PrinterDriver *driver, const char *uploads_dir) {
+    /* The READY -> PRINTING transition happens here, in one locked step,
+     * rather than further down once everything else has succeeded. Two
+     * "Start" requests arriving together (an impatient double-click is
+     * enough — civetweb serves them on separate threads) would otherwise
+     * both see READY, both pass this check, and both launch a streamer
+     * thread: two threads streaming the same file into the same printer,
+     * interleaved line by line. Claiming the status up front makes the
+     * second one fail cleanly instead. Every failure path below puts it
+     * back to READY.
+     *
+     * This also has to be true for the join further down to be safe —
+     * that assumes at most one streamer thread exists at a time. */
     printer_state_lock(state);
 
     if (state->job.status != JOB_STATUS_READY) {
@@ -309,6 +425,8 @@ int job_manager_start_print(PrinterState *state, PrinterDriver *driver, const ch
 
     char path[512];
     build_upload_path(path, sizeof(path), uploads_dir, state->job.filename);
+    state->job.status = JOB_STATUS_PRINTING;
+    state->job.progress_percent = 0.0;
 
     printer_state_unlock(state);
 
@@ -318,11 +436,17 @@ int job_manager_start_print(PrinterState *state, PrinterDriver *driver, const ch
      * touching shared state here, just checking the filesystem. */
     struct stat file_info;
     if (stat(path, &file_info) != 0) {
+        printer_state_lock(state);
+        state->job.status = JOB_STATUS_READY;
+        printer_state_unlock(state);
         return -1;
     }
 
     StreamerArgs *args = malloc(sizeof(StreamerArgs));
     if (args == NULL) {
+        printer_state_lock(state);
+        state->job.status = JOB_STATUS_READY;
+        printer_state_unlock(state);
         return -1;
     }
     args->state = state;
@@ -330,29 +454,35 @@ int job_manager_start_print(PrinterState *state, PrinterDriver *driver, const ch
     strncpy(args->path, path, sizeof(args->path) - 1);
     args->path[sizeof(args->path) - 1] = '\0';
 
+    /* Reap the previous print's thread, if there was one. The handle is
+     * copied out and thread_valid cleared while holding the mutex, and
+     * the join then happens with the mutex RELEASED — the same pattern
+     * job_manager_shutdown() uses, and for the same reason: the streamer
+     * thread takes this very mutex on every loop iteration and again on
+     * its way out, so joining it while holding the mutex is a guaranteed
+     * deadlock the moment that thread is still alive (which it can be —
+     * it keeps running its abort safety sequence for a moment after a
+     * cancel). Blocking here is correct: only one streamer thread may
+     * exist at a time, so a new print genuinely has to wait for the old
+     * one to be finished. */
     pthread_mutex_lock(&s_streamer.mutex);
-    if (s_streamer.thread_valid) {
-        /* The only way we get here with thread_valid still set is that
-         * an earlier print's thread already ran to completion (job
-         * status can't be READY again until it has) — this join reclaims
-         * its resources and returns immediately rather than blocking. */
-        pthread_join(s_streamer.thread, NULL);
-        s_streamer.thread_valid = 0;
-    }
-    s_streamer.cancel_requested = 0;
+    int has_previous_thread = s_streamer.thread_valid;
+    pthread_t previous_thread = s_streamer.thread;
+    s_streamer.thread_valid = 0;
     pthread_mutex_unlock(&s_streamer.mutex);
 
-    /* Flip the job to PRINTING *before* the thread starts, not after —
-     * streamer_thread_main checks state->job.status as soon as it starts
-     * running, so if this happened afterward the thread could see the
-     * still-stale JOB_STATUS_READY and immediately treat that as "someone
-     * else cancelled me" and abort. */
-    printer_state_lock(state);
-    state->job.status = JOB_STATUS_PRINTING;
-    state->job.progress_percent = 0.0;
-    printer_state_unlock(state);
+    if (has_previous_thread) {
+        pthread_join(previous_thread, NULL);
+    }
 
+    /* Cleared only after the join, and only after the job status is
+     * already PRINTING. Both orderings matter: clearing it before the
+     * join would let the thread we're waiting on look up, see a job
+     * that's PRINTING again and no cancel pending, and carry on
+     * streaming its old file — the flag is the only thing that
+     * distinguishes "you were cancelled" from "a new print started". */
     pthread_mutex_lock(&s_streamer.mutex);
+    s_streamer.cancel_requested = 0;
     int create_result = pthread_create(&s_streamer.thread, NULL, streamer_thread_main, args);
     s_streamer.thread_valid = (create_result == 0);
     pthread_mutex_unlock(&s_streamer.mutex);
@@ -491,6 +621,15 @@ int job_manager_file_exists(const char *uploads_dir, const char *filename) {
 int job_manager_select_existing(PrinterState *state, const char *uploads_dir,
                                 const char *filename) {
     if (!job_manager_file_exists(uploads_dir, filename)) {
+        return -1;
+    }
+
+    /* Selecting a different file mid-print would silently kill the print:
+     * the streamer thread watches state->job.status and treats "not
+     * PRINTING any more" as "someone cancelled me", so the READY set
+     * below would stop the print dead with the heaters still on and no
+     * indication in the UI that anything happened. */
+    if (print_is_active(state)) {
         return -1;
     }
 

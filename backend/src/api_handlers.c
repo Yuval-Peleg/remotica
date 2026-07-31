@@ -101,6 +101,22 @@ static double clamp(double value, double min, double max) {
     return value;
 }
 
+/* True while a print is running or paused. Several endpoints have to
+ * refuse outright in that situation rather than do something dangerous
+ * to a print already in progress — see each call site below for what
+ * specifically goes wrong. job_manager.c enforces the same rule
+ * internally for the ones that go through it; checking here as well is
+ * deliberate duplication, so the client gets an honest 409 ("that
+ * conflicts with the printer's current state") instead of a misleading
+ * "file not found"-shaped error. */
+static int print_is_active(PrinterState *state) {
+    printer_state_lock(state);
+    int active =
+        (state->job.status == JOB_STATUS_PRINTING || state->job.status == JOB_STATUS_PAUSED);
+    printer_state_unlock(state);
+    return active;
+}
+
 /* Reads the "filename" query string parameter (e.g. from
  * "?filename=benchy.gcode") into `out`. Returns 1 on success, or 0 and
  * sends a 400 error itself if it's missing — so callers can just
@@ -150,6 +166,21 @@ static int jog_handler(struct mg_connection *conn, void *cbdata) {
 
     if (strcmp(req_info->request_method, "POST") != 0) {
         mg_send_http_error(conn, 405, "Use POST");
+        return 1;
+    }
+
+    /* Jogging during a print isn't just "a move at a bad time": a jog is
+     * sent as G91 / G1 / G90, and those lines are interleaved into the
+     * same single command stream the print file is being fed through. If
+     * one lands between two lines of the file, the file's own modal
+     * positioning mode is silently replaced — the next line, written to
+     * mean "move to X150", is then obeyed as "move 150mm from here", and
+     * the head takes off across the bed at layer height (or the extruder
+     * is asked for several thousand millimetres of filament). Refuse
+     * instead. Temperature changes stay allowed: those are a normal,
+     * legitimate thing to do mid-print. */
+    if (print_is_active(ctx->state)) {
+        mg_send_http_error(conn, 409, "Cannot jog while a print is in progress");
         return 1;
     }
 
@@ -249,6 +280,15 @@ static int home_handler(struct mg_connection *conn, void *cbdata) {
 
     if (strcmp(req_info->request_method, "POST") != 0) {
         mg_send_http_error(conn, 405, "Use POST");
+        return 1;
+    }
+
+    /* Homing mid-print is worse than jogging mid-print: G28 drives the
+     * head to the endstops at homing speed on a path that goes straight
+     * through whatever is being printed, and afterwards the print file's
+     * remaining coordinates no longer mean what they did. */
+    if (print_is_active(ctx->state)) {
+        mg_send_http_error(conn, 409, "Cannot home while a print is in progress");
         return 1;
     }
 
@@ -406,6 +446,15 @@ static int upload_handler(struct mg_connection *conn, void *cbdata) {
         return 1;
     }
 
+    /* Rejected up front rather than after reading the (potentially
+     * multi-megabyte) body — job_manager_save_upload refuses too, but
+     * there's no reason to spend the transfer first. See its doc comment
+     * for why an upload mid-print is unsafe. */
+    if (print_is_active(ctx->state)) {
+        mg_send_http_error(conn, 409, "Cannot upload a file while a print is in progress");
+        return 1;
+    }
+
     long long content_length = req_info->content_length;
     if (content_length <= 0 || content_length > MAX_UPLOAD_BYTES) {
         mg_send_http_error(conn, 400, "Missing, empty, or too-large request body (limit %d bytes)",
@@ -442,7 +491,9 @@ static int upload_handler(struct mg_connection *conn, void *cbdata) {
     free(body);
 
     if (save_result != 0) {
-        mg_send_http_error(conn, 400, "Could not save upload (invalid filename or disk error)");
+        mg_send_http_error(conn, 400,
+                           "Could not save upload (invalid filename, disk error, or a print "
+                           "started in the meantime)");
         return 1;
     }
 
@@ -617,6 +668,14 @@ static int files_select_handler(struct mg_connection *conn, void *cbdata) {
 
     char filename[256];
     if (!get_filename_query_param(conn, filename, sizeof(filename))) {
+        return 1;
+    }
+
+    /* Selecting a different file mid-print would stop the running print
+     * (see job_manager_select_existing) — and this endpoint is one click
+     * in the "on device" file browser, so it's an easy mistake to make. */
+    if (print_is_active(ctx->state)) {
+        mg_send_http_error(conn, 409, "Cannot select a file while a print is in progress");
         return 1;
     }
 

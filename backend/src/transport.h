@@ -88,9 +88,12 @@ typedef struct PrinterDriver {
      * file, so this just relays it and reports whether the printer
      * accepted it. Called from the streamer's own background thread (see
      * job_manager_start_print), never from the shared tick thread, since
-     * waiting for each line's acknowledgement can take up to a few
-     * seconds on real hardware. Returns 0 on success, -1 on failure (not
-     * connected, write error, or no "ok" within the timeout). */
+     * waiting for each line's acknowledgement can take MINUTES on real
+     * hardware — a line like M109 ("heat the hotend and don't answer
+     * until it's there") legitimately doesn't reply until the printer has
+     * physically reached the temperature. Returns 0 on success, -1 on
+     * failure (not connected, write error, or no "ok" within the
+     * timeout). */
     int (*send_gcode_line)(struct PrinterDriver *self, const char *line);
 
     /* Every driver needs somewhere to keep its own private data (e.g. the

@@ -30,11 +30,14 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <poll.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <termios.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "console_log.h"
@@ -47,9 +50,19 @@
 /* How long to wait for "ok" after different kinds of commands. Homing can
  * take a long time (the printer physically has to reach its limit
  * switches), so it gets a much longer allowance than a quick temperature
- * command. */
+ * command.
+ *
+ * TIMEOUT_MS_LONG_RUNNING exists because a handful of gcode commands
+ * legitimately don't answer for minutes, not seconds: M109/M190 don't
+ * reply until the hotend/bed has actually REACHED its target (a cold
+ * start is easily 2-5 minutes), G28/G29 physically home and probe the
+ * bed, G4 is an explicit dwell, and M600 waits for a human to swap
+ * filament. Real slicer start-gcode contains several of these, so
+ * applying the 5-second allowance to them would abort virtually every
+ * real print during its own warm-up. See command_timeout_ms() below. */
 #define TIMEOUT_MS_NORMAL 5000
 #define TIMEOUT_MS_HOMING 30000
+#define TIMEOUT_MS_LONG_RUNNING 300000
 
 /* Arduino-compatible boards (which is what most 3D printer mainboards
  * are) reset themselves when a serial connection is opened — this is a
@@ -68,13 +81,94 @@
  * inside this struct (see the `void *impl_data` comment in transport.h). */
 typedef struct {
     char device_path[64];
-    int fd;               /* the open serial port, or -1 if not connected */
+    int fd; /* the open serial port, or -1 if not connected */
+
+    /* A serial port is a single, strictly sequential conversation: one
+     * command out, one "ok" back, and nothing may interleave in between.
+     * But the driver functions below are called from THREE different
+     * threads — civetweb's HTTP worker threads (jog/home/temp), the
+     * shared 300ms tick thread (the M105 temperature poll), and the print
+     * streamer thread in job_manager.c (send_gcode_line). Without this
+     * lock, two writes can splice into one garbled line on the wire, and
+     * two readers (read_line() consumes one byte at a time) can each end
+     * up holding half of the same reply and neither ever sees a coherent
+     * "ok". So every write-then-wait-for-ok exchange holds this for the
+     * WHOLE exchange, not just the write.
+     *
+     * Lock ordering rule, followed everywhere in this file: io_lock is
+     * taken first and released BEFORE printer_state_lock() is taken.
+     * The two are never held at the same time, in either order — that's
+     * what keeps a slow serial exchange from blocking the state
+     * broadcaster, and makes a lock-order-inversion deadlock impossible
+     * by construction. */
+    pthread_mutex_t io_lock;
+
     int ticks_since_poll; /* counts up to TEMP_POLL_EVERY_N_TICKS */
 } SerialImplData;
 
 /* ---------------------------------------------------------------------
+ * Deadlines
+ *
+ * Every wait in this file is bounded by a single absolute deadline
+ * computed once, up front, rather than by a per-read timeout. The
+ * difference matters: Marlin can emit an unbounded number of non-"ok"
+ * lines while we're waiting (auto temperature reports, "busy: processing"
+ * keepalives), and a per-read timeout restarts the clock on every one of
+ * them — so if the real "ok" is ever lost, the wait never ends, which
+ * also hangs job_manager_shutdown()'s pthread_join and makes even Ctrl+C
+ * unable to stop the backend. CLOCK_MONOTONIC (not CLOCK_REALTIME)
+ * because it can't jump backwards if the system clock is adjusted.
+ * --------------------------------------------------------------------- */
+
+static void deadline_init(struct timespec *deadline, int timeout_ms) {
+    clock_gettime(CLOCK_MONOTONIC, deadline);
+    deadline->tv_sec += timeout_ms / 1000;
+    deadline->tv_nsec += (long)(timeout_ms % 1000) * 1000000L;
+    if (deadline->tv_nsec >= 1000000000L) {
+        deadline->tv_nsec -= 1000000000L;
+        deadline->tv_sec += 1;
+    }
+}
+
+/* Milliseconds left until `deadline`, never negative — 0 means "already
+ * expired", which poll() treats as "check once and return immediately",
+ * exactly the behaviour we want. */
+static int deadline_remaining_ms(const struct timespec *deadline) {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+
+    long long remaining = (long long)(deadline->tv_sec - now.tv_sec) * 1000LL +
+                          (long long)(deadline->tv_nsec - now.tv_nsec) / 1000000LL;
+
+    if (remaining < 0) {
+        return 0;
+    }
+    if (remaining > INT_MAX) {
+        return INT_MAX;
+    }
+    return (int)remaining;
+}
+
+/* ---------------------------------------------------------------------
  * Low-level line I/O
  * --------------------------------------------------------------------- */
+
+/* Marlin reports genuinely bad news (thermal runaway, a failed
+ * thermistor, "Printer halted. kill() called!") as lines beginning with
+ * "Error:" or "!!". Those look like any other non-"ok" line to the wait
+ * loops below, so without this they'd be discarded in silence while the
+ * printer is on fire — literally, in the thermal-runaway case. This
+ * doesn't attempt any recovery (that's a much bigger design question),
+ * it just makes sure the line reaches the backend's own log; the raw text
+ * is separately already visible in the frontend's gcode console, since
+ * read_line() records everything it receives. */
+static int is_error_line(const char *line) {
+    return strncmp(line, "Error:", 6) == 0 || strncmp(line, "!!", 2) == 0;
+}
+
+static void note_error_line(const char *line) {
+    fprintf(stderr, "Printer reported an error: %s\n", line);
+}
 
 /* Writes `line` followed by a newline to the serial port. write() is
  * allowed to write fewer bytes than asked in a single call (this is
@@ -112,9 +206,11 @@ static int write_line(int fd, const char *line, ConsoleLog *console) {
 }
 
 /* Reads a single line (up to and including the terminating '\n', which is
- * stripped) from the serial port, waiting up to timeout_ms in total.
+ * stripped) from the serial port, giving up at `deadline` (see the
+ * deadline helpers above — the budget is shared with whatever else the
+ * caller still has to do, it is NOT restarted per line).
  * Returns the number of bytes read into `buf` (not counting the removed
- * newline) on success, or -1 if the timeout was reached or an error
+ * newline) on success, or -1 if the deadline was reached or an error
  * happened first. `buf` is always null-terminated on success.
  *
  * This reads one byte at a time, which is not the most efficient way to
@@ -122,21 +218,22 @@ static int write_line(int fd, const char *line, ConsoleLog *console) {
  * infrequent, so simplicity and correctness matter a lot more here than
  * squeezing out extra performance.
  *
+ * A line too long for `buf` is reported as a failure, but the rest of it
+ * is still read and thrown away first: leaving the tail sitting in the
+ * OS receive buffer would make it look like the beginning of the NEXT
+ * line, and one misaligned line is all it takes to leave an "ok"
+ * unconsumed and desync the whole protocol from then on.
+ *
  * If `console` is non-NULL and a complete line is actually read (not on
  * timeout/error), it's recorded there as a "received" entry. */
-static int read_line(int fd, char *buf, size_t buf_size, int timeout_ms, ConsoleLog *console) {
+static int read_line(int fd, char *buf, size_t buf_size, const struct timespec *deadline,
+                     ConsoleLog *console) {
     size_t length = 0;
+    int overflowed = 0;
     struct pollfd pfd = {.fd = fd, .events = POLLIN};
 
-    while (length + 1 < buf_size) {
-        int remaining_ms = timeout_ms; /* recomputing an exact remaining
-                                        * budget adds complexity for
-                                        * little real benefit here, since
-                                        * printer replies normally arrive
-                                        * as one small burst — each
-                                        * individual poll() just reuses
-                                        * the original timeout */
-        int poll_result = poll(&pfd, 1, remaining_ms);
+    for (;;) {
+        int poll_result = poll(&pfd, 1, deadline_remaining_ms(deadline));
         if (poll_result < 0) {
             if (errno == EINTR) {
                 continue;
@@ -144,7 +241,7 @@ static int read_line(int fd, char *buf, size_t buf_size, int timeout_ms, Console
             return -1;
         }
         if (poll_result == 0) {
-            return -1; /* timed out with no complete line received */
+            return -1; /* deadline hit with no complete line received */
         }
 
         char byte;
@@ -154,39 +251,63 @@ static int read_line(int fd, char *buf, size_t buf_size, int timeout_ms, Console
         }
 
         if (byte == '\n') {
+            if (overflowed) {
+                return -1; /* line was longer than our buffer, now fully discarded */
+            }
             buf[length] = '\0';
             if (console != NULL) {
                 console_log_append(console, CONSOLE_DIRECTION_RECEIVED, buf);
             }
             return (int)length;
         }
-        if (byte != '\r') { /* skip carriage returns, keep everything else */
+        if (byte == '\r') {
+            continue; /* skip carriage returns, keep everything else */
+        }
+        if (length + 1 < buf_size) {
             buf[length++] = byte;
+        } else {
+            overflowed = 1; /* keep draining to the newline, see above */
         }
     }
-
-    return -1; /* line longer than our buffer — treat as a failure */
 }
 
 /* Sends a command and waits for a reply line starting with "ok" (Marlin's
- * standard "I processed that, send me the next one" acknowledgement).
- * Any reply lines that DON'T start with "ok" while waiting (e.g.
- * unsolicited temperature auto-reports) are simply ignored here — this
+ * standard "I processed that, send me the next one" acknowledgement),
+ * for at most timeout_ms in TOTAL across however many lines arrive first.
+ * Reply lines that DON'T start with "ok" (unsolicited temperature
+ * auto-reports, "busy: processing" keepalives) are ignored — this
  * function is only used for commands where we don't need to look at the
  * reply's contents, just confirm it succeeded. Returns 0 on success, -1
- * on failure or timeout. */
+ * on failure or timeout.
+ *
+ * The tcflush() on the failure path is important and not just tidiness:
+ * if we give up on a command and its "ok" then turns up a moment later,
+ * the NEXT command's wait would be satisfied by that stale ack instead of
+ * its own. From that point on this driver runs permanently one command
+ * ahead of the printer, believing moves have completed that haven't —
+ * silent, and exactly the kind of desync that ends with a nozzle
+ * somewhere it shouldn't be. Dropping whatever is in the input buffer is
+ * the cheap way to guarantee we resynchronise. */
 static int send_and_wait_for_ok(int fd, const char *line, int timeout_ms, ConsoleLog *console) {
     if (write_line(fd, line, console) != 0) {
         return -1;
     }
 
+    struct timespec deadline;
+    deadline_init(&deadline, timeout_ms);
+
     char reply[256];
-    while (read_line(fd, reply, sizeof(reply), timeout_ms, console) >= 0) {
+    while (read_line(fd, reply, sizeof(reply), &deadline, console) >= 0) {
         if (strncmp(reply, "ok", 2) == 0) {
             return 0;
         }
-        /* Not an "ok" line — keep waiting for one until we time out. */
+        if (is_error_line(reply)) {
+            note_error_line(reply);
+        }
+        /* Not an "ok" line — keep waiting for one until the deadline. */
     }
+
+    tcflush(fd, TCIFLUSH);
     return -1;
 }
 
@@ -209,10 +330,16 @@ static void query_firmware_info(int fd, ConsoleLog *console, char *out, size_t o
         return;
     }
 
+    struct timespec deadline;
+    deadline_init(&deadline, TIMEOUT_MS_NORMAL);
+
     char reply[256];
-    while (read_line(fd, reply, sizeof(reply), TIMEOUT_MS_NORMAL, console) >= 0) {
+    while (read_line(fd, reply, sizeof(reply), &deadline, console) >= 0) {
         if (strncmp(reply, "ok", 2) == 0) {
             return;
+        }
+        if (is_error_line(reply)) {
+            note_error_line(reply);
         }
         if (out[0] == '\0') {
             /* snprintf (not strncpy) specifically because its destination
@@ -224,6 +351,11 @@ static void query_firmware_info(int fd, ConsoleLog *console, char *out, size_t o
             snprintf(out, out_size, "%s", reply);
         }
     }
+
+    /* Same reasoning as send_and_wait_for_ok's failure path: we're
+     * leaving without having consumed M115's "ok", so drop anything still
+     * in flight rather than let it ack somebody else's command later. */
+    tcflush(fd, TCIFLUSH);
 }
 
 /* ---------------------------------------------------------------------
@@ -285,10 +417,13 @@ static int serial_connect(PrinterDriver *self) {
         return -1;
     }
 
-    /* Discard any leftover bytes sitting in the OS's serial buffers from
-     * before we opened the port (e.g. boot-up noise). */
-    tcflush(fd, TCIOFLUSH);
+    /* Queried into a local buffer first (not directly into the shared
+     * state) because it involves real serial I/O with multi-second
+     * timeouts — same "don't hold the lock during slow work" reasoning
+     * as printer_state_to_json(). */
+    char firmware_info[sizeof(((PrinterState *)0)->firmware_info)];
 
+    pthread_mutex_lock(&impl->io_lock);
     impl->fd = fd;
 
     /* See the BOOT_WAIT_SECONDS comment above: most printer mainboards
@@ -296,17 +431,19 @@ static int serial_connect(PrinterDriver *self) {
      * booting before we start sending it commands. */
     sleep(BOOT_WAIT_SECONDS);
 
+    /* Discard whatever the board said while it was booting. This has to
+     * happen AFTER the sleep, not before it: the reset is triggered by
+     * our own open() a moment ago, so at this point in the function the
+     * boot banner ("start", version strings, SD-card chatter) hasn't been
+     * sent yet — flushing first would flush an empty buffer and leave all
+     * of it to be misread as replies to our first real command. */
+    tcflush(fd, TCIOFLUSH);
+
+    query_firmware_info(fd, self->console, firmware_info, sizeof(firmware_info));
+    pthread_mutex_unlock(&impl->io_lock);
+
     printer_state_lock(self->state);
     self->state->connected = 1;
-    printer_state_unlock(self->state);
-
-    /* Queried into a local buffer first (not directly under the lock
-     * below) because it involves real serial I/O with multi-second
-     * timeouts — same "don't hold the lock during slow work" reasoning
-     * as printer_state_to_json(). */
-    char firmware_info[sizeof(((PrinterState *)0)->firmware_info)];
-    query_firmware_info(fd, self->console, firmware_info, sizeof(firmware_info));
-    printer_state_lock(self->state);
     snprintf(self->state->firmware_info, sizeof(self->state->firmware_info), "%s", firmware_info);
     printer_state_unlock(self->state);
 
@@ -316,10 +453,19 @@ static int serial_connect(PrinterDriver *self) {
 static void serial_disconnect(PrinterDriver *self) {
     SerialImplData *impl = (SerialImplData *)self->impl_data;
 
+    /* Under io_lock so the fd can't be closed while another thread is
+     * part-way through a write/read on it — main.c stops civetweb and
+     * joins the print streamer before calling this, so in practice
+     * nothing else should still be in here, but closing an fd out from
+     * under a concurrent read() is bad enough (the number can be reused
+     * by an unrelated open()) to be worth making structurally
+     * impossible rather than merely unlikely. */
+    pthread_mutex_lock(&impl->io_lock);
     if (impl->fd >= 0) {
         close(impl->fd);
         impl->fd = -1;
     }
+    pthread_mutex_unlock(&impl->io_lock);
 
     printer_state_lock(self->state);
     self->state->connected = 0;
@@ -342,14 +488,35 @@ static int serial_jog(PrinterDriver *self, char axis, double delta_mm) {
     /* G91 = relative positioning ("move BY this much", not "move TO this
      * position") — exactly what a jog command means. G90 switches back to
      * absolute positioning afterward, which is what the rest of this
-     * driver (and most gcode files) assume as the normal mode. */
+     * driver (and most gcode files) assume as the normal mode.
+     *
+     * All three lines go out under one io_lock hold: they're a single
+     * modal-state transaction, and another thread slipping a command in
+     * between the G91 and the G90 would have it silently reinterpreted as
+     * a relative move. (api_handlers.c also refuses jogs outright while a
+     * print is running, for exactly the same reason at a higher level.) */
+    pthread_mutex_lock(&impl->io_lock);
+    if (impl->fd < 0) {
+        pthread_mutex_unlock(&impl->io_lock);
+        return -1; /* not connected */
+    }
+
+    int failed = 0;
     if (send_and_wait_for_ok(impl->fd, "G91", TIMEOUT_MS_NORMAL, self->console) != 0) {
-        return -1;
+        failed = 1;
+    } else if (send_and_wait_for_ok(impl->fd, move_command, TIMEOUT_MS_NORMAL, self->console) !=
+               0) {
+        /* The move failed, but we're the ones who put the printer into
+         * relative mode, so still try to put it back — leaving it in G91
+         * would silently change the meaning of every later command. */
+        failed = 1;
+        send_and_wait_for_ok(impl->fd, "G90", TIMEOUT_MS_NORMAL, self->console);
+    } else if (send_and_wait_for_ok(impl->fd, "G90", TIMEOUT_MS_NORMAL, self->console) != 0) {
+        failed = 1;
     }
-    if (send_and_wait_for_ok(impl->fd, move_command, TIMEOUT_MS_NORMAL, self->console) != 0) {
-        return -1;
-    }
-    if (send_and_wait_for_ok(impl->fd, "G90", TIMEOUT_MS_NORMAL, self->console) != 0) {
+    pthread_mutex_unlock(&impl->io_lock);
+
+    if (failed) {
         return -1;
     }
 
@@ -386,7 +553,15 @@ static int serial_home(PrinterDriver *self) {
     SerialImplData *impl = (SerialImplData *)self->impl_data;
 
     /* G28 with no axis letters homes all of X, Y, and Z. */
-    if (send_and_wait_for_ok(impl->fd, "G28", TIMEOUT_MS_HOMING, self->console) != 0) {
+    pthread_mutex_lock(&impl->io_lock);
+    if (impl->fd < 0) {
+        pthread_mutex_unlock(&impl->io_lock);
+        return -1; /* not connected */
+    }
+    int result = send_and_wait_for_ok(impl->fd, "G28", TIMEOUT_MS_HOMING, self->console);
+    pthread_mutex_unlock(&impl->io_lock);
+
+    if (result != 0) {
         return -1;
     }
 
@@ -414,7 +589,15 @@ static int serial_set_target_temp(PrinterDriver *self, PrinterHeater heater, dou
         snprintf(command, sizeof(command), "M140 S%.1f", celsius);
     }
 
-    if (send_and_wait_for_ok(impl->fd, command, TIMEOUT_MS_NORMAL, self->console) != 0) {
+    pthread_mutex_lock(&impl->io_lock);
+    if (impl->fd < 0) {
+        pthread_mutex_unlock(&impl->io_lock);
+        return -1; /* not connected */
+    }
+    int result = send_and_wait_for_ok(impl->fd, command, TIMEOUT_MS_NORMAL, self->console);
+    pthread_mutex_unlock(&impl->io_lock);
+
+    if (result != 0) {
         return -1;
     }
 
@@ -440,6 +623,20 @@ static void serial_tick(PrinterDriver *self) {
     if (impl->ticks_since_poll < TEMP_POLL_EVERY_N_TICKS) {
         return;
     }
+
+    /* trylock, NOT lock: this runs on the shared tick thread that also
+     * drives the WebSocket broadcast, and the port can legitimately be
+     * held for minutes at a time by a print streaming an M109 "wait for
+     * temperature" line. Blocking here would stall every connected
+     * browser's live view for that entire wait, to fetch a temperature
+     * reading that is only ever nice-to-have. Skipping the poll and
+     * retrying on the next tick costs nothing. ticks_since_poll is
+     * deliberately left at (or above) the threshold when we skip, so we
+     * retry every tick until the port frees up rather than waiting
+     * another full poll interval. */
+    if (pthread_mutex_trylock(&impl->io_lock) != 0) {
+        return;
+    }
     impl->ticks_since_poll = 0;
 
     /* M105 asks the printer to report its current temperatures. The
@@ -448,15 +645,33 @@ static void serial_tick(PrinterDriver *self) {
      * "T:" is the hotend (current /target), "B:" is the bed. We don't
      * assume "ok" and the temperature data are on the same line or in any
      * particular order relative to each other across firmware versions,
-     * so this sends M105, then reads reply lines until it either finds
-     * one containing "T:" (which is where the useful data lives) or
-     * times out. */
+     * so this sends M105, then reads reply lines until it finds one
+     * containing "T:" (which is where the useful data lives).
+     *
+     * Note that it then keeps reading until the "ok" rather than
+     * returning the moment the numbers are parsed: with Marlin's
+     * temperature auto-reporting enabled (M155), a SPONTANEOUS report can
+     * arrive before our M105's own reply, and returning early there would
+     * leave the real "ok" in the buffer to be mistaken for the
+     * acknowledgement of whatever command goes out next. */
     if (write_line(impl->fd, "M105", self->console) != 0) {
+        pthread_mutex_unlock(&impl->io_lock);
         return;
     }
 
+    struct timespec deadline;
+    deadline_init(&deadline, TIMEOUT_MS_NORMAL);
+
+    int got_temps = 0;
+    int saw_ok = 0;
+    double hotend_current = 0.0, hotend_target = 0.0, bed_current = 0.0, bed_target = 0.0;
+
     char reply[256];
-    while (read_line(impl->fd, reply, sizeof(reply), TIMEOUT_MS_NORMAL, self->console) >= 0) {
+    while (read_line(impl->fd, reply, sizeof(reply), &deadline, self->console) >= 0) {
+        if (is_error_line(reply)) {
+            note_error_line(reply);
+        }
+
         /* Find "T:" and "B:" anywhere in the line, then parse the two
          * numbers that follow each one. Searching with strstr() first
          * (rather than trying to do it all in one sscanf format string)
@@ -467,24 +682,56 @@ static void serial_tick(PrinterDriver *self) {
         char *hotend_part = strstr(reply, "T:");
         char *bed_part = strstr(reply, "B:");
 
-        if (hotend_part != NULL && bed_part != NULL) {
-            double hotend_current, hotend_target, bed_current, bed_target;
+        if (!got_temps && hotend_part != NULL && bed_part != NULL) {
             int hotend_matched = sscanf(hotend_part, "T:%lf /%lf", &hotend_current, &hotend_target);
             int bed_matched = sscanf(bed_part, "B:%lf /%lf", &bed_current, &bed_target);
-
-            if (hotend_matched == 2 && bed_matched == 2) {
-                printer_state_lock(self->state);
-                self->state->hotend.current_c = hotend_current;
-                self->state->hotend.target_c = hotend_target;
-                self->state->bed.current_c = bed_current;
-                self->state->bed.target_c = bed_target;
-                printer_state_unlock(self->state);
-                return;
-            }
+            got_temps = (hotend_matched == 2 && bed_matched == 2);
         }
-        /* Not the line we're looking for (could be a bare "ok", or
-         * something else) — keep reading until we find it or time out. */
+
+        if (strncmp(reply, "ok", 2) == 0) {
+            saw_ok = 1;
+            break;
+        }
     }
+
+    if (!saw_ok) {
+        tcflush(impl->fd, TCIFLUSH); /* same resync reasoning as send_and_wait_for_ok */
+    }
+    pthread_mutex_unlock(&impl->io_lock);
+
+    /* State is only touched after io_lock is released — see the lock
+     * ordering rule on SerialImplData. */
+    if (got_temps) {
+        printer_state_lock(self->state);
+        self->state->hotend.current_c = hotend_current;
+        self->state->hotend.target_c = hotend_target;
+        self->state->bed.current_c = bed_current;
+        self->state->bed.target_c = bed_target;
+        printer_state_unlock(self->state);
+    }
+}
+
+/* How long to allow for `line`'s "ok", based on its command word — see
+ * the TIMEOUT_MS_LONG_RUNNING comment at the top of the file for why a
+ * handful of commands need minutes rather than seconds.
+ *
+ * The comparison is against the whole command word (everything up to the
+ * first space), not a prefix: "G4" is a dwell, but "G40" is not, and a
+ * plain strncmp("G4", ...) would treat both the same. */
+static int command_timeout_ms(const char *line) {
+    static const char *const long_running[] = {"M109", "M190", "G28", "G29", "M600", "G4"};
+
+    size_t word_len = 0;
+    while (line[word_len] != '\0' && line[word_len] != ' ' && line[word_len] != '\t') {
+        word_len++;
+    }
+
+    for (size_t i = 0; i < sizeof(long_running) / sizeof(long_running[0]); i++) {
+        if (strlen(long_running[i]) == word_len && strncmp(line, long_running[i], word_len) == 0) {
+            return TIMEOUT_MS_LONG_RUNNING;
+        }
+    }
+    return TIMEOUT_MS_NORMAL;
 }
 
 /* Real hardware doesn't get an optimistic position update the way
@@ -498,11 +745,15 @@ static void serial_tick(PrinterDriver *self) {
 static int serial_send_gcode_line(PrinterDriver *self, const char *line) {
     SerialImplData *impl = (SerialImplData *)self->impl_data;
 
+    pthread_mutex_lock(&impl->io_lock);
     if (impl->fd < 0) {
+        pthread_mutex_unlock(&impl->io_lock);
         return -1; /* not connected */
     }
+    int result = send_and_wait_for_ok(impl->fd, line, command_timeout_ms(line), self->console);
+    pthread_mutex_unlock(&impl->io_lock);
 
-    return send_and_wait_for_ok(impl->fd, line, TIMEOUT_MS_NORMAL, self->console);
+    return result;
 }
 
 PrinterDriver *transport_serial_create(PrinterState *state, ConsoleLog *console,
@@ -519,9 +770,11 @@ PrinterDriver *transport_serial_create(PrinterState *state, ConsoleLog *console,
     impl->device_path[sizeof(impl->device_path) - 1] = '\0';
     impl->fd = -1;
     impl->ticks_since_poll = 0;
+    pthread_mutex_init(&impl->io_lock, NULL);
 
     PrinterDriver *driver = malloc(sizeof(PrinterDriver));
     if (driver == NULL) {
+        pthread_mutex_destroy(&impl->io_lock);
         free(impl);
         return NULL;
     }
@@ -550,6 +803,10 @@ void transport_serial_destroy(PrinterDriver *driver) {
         if (impl->fd >= 0) {
             close(impl->fd);
         }
+        /* Only ever called from main.c's shutdown path, after civetweb
+         * has stopped and the print streamer has been joined, so nothing
+         * can still be holding this. */
+        pthread_mutex_destroy(&impl->io_lock);
         free(impl);
     }
 
