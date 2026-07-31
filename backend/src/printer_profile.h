@@ -24,6 +24,8 @@ typedef struct {
     double bed_depth_mm;
     double max_z_mm;
     double min_extrude_temp_c;
+    double max_hotend_temp_c;
+    double max_bed_temp_c;
 } PrinterProfile;
 
 /* Fills in the same numbers the frontend currently hardcodes, so the

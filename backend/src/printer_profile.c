@@ -23,6 +23,11 @@ void printer_profile_defaults(PrinterProfile *profile) {
     profile->bed_depth_mm = 220.0;
     profile->max_z_mm = 250.0;
     profile->min_extrude_temp_c = 170.0;
+    /* These two match the frontend's previous hardcoded TempDial ceilings
+     * exactly, so nothing about the dials' behavior changes until someone
+     * actually edits these in the Settings page. */
+    profile->max_hotend_temp_c = 280.0;
+    profile->max_bed_temp_c = 120.0;
 }
 
 /* Small helper: given a JSON object and a field name, if that field
@@ -50,6 +55,8 @@ int printer_profile_from_json(PrinterProfile *profile, const cJSON *json) {
     read_number_field(json, "bedDepthMm", &profile->bed_depth_mm);
     read_number_field(json, "maxZMm", &profile->max_z_mm);
     read_number_field(json, "minExtrudeTempC", &profile->min_extrude_temp_c);
+    read_number_field(json, "maxHotendTempC", &profile->max_hotend_temp_c);
+    read_number_field(json, "maxBedTempC", &profile->max_bed_temp_c);
 
     return 0;
 }
@@ -65,6 +72,8 @@ cJSON *printer_profile_to_json(const PrinterProfile *profile) {
     cJSON_AddNumberToObject(root, "bedDepthMm", profile->bed_depth_mm);
     cJSON_AddNumberToObject(root, "maxZMm", profile->max_z_mm);
     cJSON_AddNumberToObject(root, "minExtrudeTempC", profile->min_extrude_temp_c);
+    cJSON_AddNumberToObject(root, "maxHotendTempC", profile->max_hotend_temp_c);
+    cJSON_AddNumberToObject(root, "maxBedTempC", profile->max_bed_temp_c);
 
     return root;
 }

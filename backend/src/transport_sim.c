@@ -65,6 +65,14 @@ static double jitter(double amount) {
 static int sim_connect(PrinterDriver *self) {
     printer_state_lock(self->state);
     self->state->connected = 1;
+    /* Mirrors what a real M115 reply would populate on transport_serial.c
+     * (see query_firmware_info there), so the Settings page's "detected
+     * firmware" hint has something to show in the default sim-driven demo
+     * too, not just when real hardware is attached. */
+    strncpy(self->state->firmware_info,
+            "FIRMWARE_NAME:Remotica Simulator MACHINE_TYPE:Simulated Printer",
+            sizeof(self->state->firmware_info) - 1);
+    self->state->firmware_info[sizeof(self->state->firmware_info) - 1] = '\0';
     printer_state_unlock(self->state);
     return 0;
 }

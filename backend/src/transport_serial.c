@@ -190,6 +190,42 @@ static int send_and_wait_for_ok(int fd, const char *line, int timeout_ms, Consol
     return -1;
 }
 
+/* Sends M115 ("firmware info") and captures the first line of whatever
+ * comes back before "ok", writing it into `out` (left as an empty string
+ * if the printer doesn't reply in time, or replies with just "ok" and
+ * nothing else). This is a BEST-EFFORT hint, not reliable identification
+ * — see the big comment on PrinterState's firmware_info field for why.
+ * Real Marlin's M115 reply normally looks like:
+ *   FIRMWARE_NAME:Marlin 2.0.9.2 ... MACHINE_TYPE:... EXTRUDER_COUNT:1 ...
+ *   ok
+ * i.e. one info line, then a separate "ok" — this keeps that first line
+ * and then keeps reading (and discarding) until "ok" or a timeout, so a
+ * slow/chatty firmware doesn't leave leftover bytes sitting in the read
+ * buffer for the next real command to trip over. */
+static void query_firmware_info(int fd, ConsoleLog *console, char *out, size_t out_size) {
+    out[0] = '\0';
+
+    if (write_line(fd, "M115", console) != 0) {
+        return;
+    }
+
+    char reply[256];
+    while (read_line(fd, reply, sizeof(reply), TIMEOUT_MS_NORMAL, console) >= 0) {
+        if (strncmp(reply, "ok", 2) == 0) {
+            return;
+        }
+        if (out[0] == '\0') {
+            /* snprintf (not strncpy) specifically because its destination
+             * size is a runtime parameter here, not a compile-time
+             * sizeof(out) the compiler can see — strncpy's silent,
+             * possibly-unterminated truncation is exactly the pattern
+             * -Wstringop-truncation warns about in that situation, even
+             * though it would've been safe here too. */
+            snprintf(out, out_size, "%s", reply);
+        }
+    }
+}
+
 /* ---------------------------------------------------------------------
  * PrinterDriver function implementations
  * --------------------------------------------------------------------- */
@@ -262,6 +298,16 @@ static int serial_connect(PrinterDriver *self) {
 
     printer_state_lock(self->state);
     self->state->connected = 1;
+    printer_state_unlock(self->state);
+
+    /* Queried into a local buffer first (not directly under the lock
+     * below) because it involves real serial I/O with multi-second
+     * timeouts — same "don't hold the lock during slow work" reasoning
+     * as printer_state_to_json(). */
+    char firmware_info[sizeof(((PrinterState *)0)->firmware_info)];
+    query_firmware_info(fd, self->console, firmware_info, sizeof(firmware_info));
+    printer_state_lock(self->state);
+    snprintf(self->state->firmware_info, sizeof(self->state->firmware_info), "%s", firmware_info);
     printer_state_unlock(self->state);
 
     return 0;

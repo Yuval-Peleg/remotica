@@ -24,6 +24,7 @@
 
 #include "cJSON.h"
 #include "civetweb.h"
+#include "printer_database.h"
 
 /* Maximum size we'll accept for a single JSON request body (jog/temp/
  * profile requests are tiny — a few dozen bytes — so this is generous
@@ -295,14 +296,19 @@ static int temp_handler(struct mg_connection *conn, void *cbdata) {
         return 1;
     }
 
+    /* The profile's max*TempC is per-printer (or per-material) and
+     * user-editable from the Settings page, but it's still clamped
+     * against these hardcoded absolute ceilings — a mistyped profile
+     * value (or one copied from the wrong printer database entry)
+     * shouldn't be able to ask real hardware to exceed them either. */
     PrinterHeater heater;
     double max_target;
     if (strcmp(heater_item->valuestring, "hotend") == 0) {
         heater = PRINTER_HEATER_HOTEND;
-        max_target = MAX_HOTEND_TARGET_C;
+        max_target = clamp(ctx->profile->max_hotend_temp_c, 0.0, MAX_HOTEND_TARGET_C);
     } else if (strcmp(heater_item->valuestring, "bed") == 0) {
         heater = PRINTER_HEATER_BED;
-        max_target = MAX_BED_TARGET_C;
+        max_target = clamp(ctx->profile->max_bed_temp_c, 0.0, MAX_BED_TARGET_C);
     } else {
         cJSON_Delete(json);
         mg_send_http_error(conn, 400, "heater must be \"hotend\" or \"bed\"");
@@ -355,6 +361,25 @@ static int profile_handler(struct mg_connection *conn, void *cbdata) {
     }
 
     mg_send_http_error(conn, 405, "Use GET or POST");
+    return 1;
+}
+
+/* ---------------------------------------------------------------------
+ * GET /api/printer-database
+ * --------------------------------------------------------------------- */
+
+static int printer_database_handler(struct mg_connection *conn, void *cbdata) {
+    (void)cbdata; /* the database is a fixed static table, no AppContext needed */
+    const struct mg_request_info *req_info = mg_get_request_info(conn);
+
+    if (strcmp(req_info->request_method, "GET") != 0) {
+        mg_send_http_error(conn, 405, "Use GET");
+        return 1;
+    }
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddItemToObject(root, "printers", printer_database_to_json());
+    send_json_and_delete(conn, root);
     return 1;
 }
 
@@ -637,6 +662,7 @@ void api_handlers_register_all(struct mg_context *ctx, AppContext *app_context) 
     mg_set_request_handler(ctx, "/api/home", home_handler, app_context);
     mg_set_request_handler(ctx, "/api/temp", temp_handler, app_context);
     mg_set_request_handler(ctx, "/api/profile", profile_handler, app_context);
+    mg_set_request_handler(ctx, "/api/printer-database", printer_database_handler, NULL);
     mg_set_request_handler(ctx, "/api/upload", upload_handler, app_context);
     mg_set_request_handler(ctx, "/api/print/start", print_start_handler, app_context);
     mg_set_request_handler(ctx, "/api/print/cancel", print_cancel_handler, app_context);

@@ -67,6 +67,8 @@ cJSON *printer_state_to_json(PrinterState *state) {
     int connected = state->connected;
     char connection_type[sizeof(state->connection_type)];
     strncpy(connection_type, state->connection_type, sizeof(connection_type));
+    char firmware_info[sizeof(state->firmware_info)];
+    strncpy(firmware_info, state->firmware_info, sizeof(firmware_info));
 
     TempReading hotend = state->hotend;
     TempReading bed = state->bed;
@@ -87,6 +89,7 @@ cJSON *printer_state_to_json(PrinterState *state) {
 
     cJSON_AddBoolToObject(root, "connected", connected);
     cJSON_AddStringToObject(root, "connectionType", connection_type);
+    cJSON_AddStringToObject(root, "firmwareInfo", firmware_info);
 
     cJSON *hotend_json = cJSON_CreateObject();
     cJSON_AddNumberToObject(hotend_json, "current", hotend.current_c);

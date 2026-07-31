@@ -78,6 +78,20 @@ typedef struct {
                                * reports "usb", matching how a 3D printer is
                                * actually normally connected */
 
+    /* Whatever the printer said back to an M115 "firmware info" query at
+     * connect time (empty string if it didn't reply, or hasn't connected
+     * yet). This is a best-effort HINT for the Settings page to show the
+     * user, NOT a reliable "detected printer model" — M115's reply format
+     * and level of detail varies a lot between firmware forks, and
+     * plenty of them just say something generic like
+     * "MACHINE_TYPE:3D Printer". Never trusted for anything that matters
+     * physically (build volume, temp limits still come from the
+     * user-edited PrinterProfile). */
+    char firmware_info[256]; /* matches the read_line() buffer size used to
+                              * capture it in transport_serial.c, so a
+                              * full M115 reply line can never be
+                              * truncated a second time on the way in */
+
     TempReading hotend;
     TempReading bed;
     PrinterPosition position;
