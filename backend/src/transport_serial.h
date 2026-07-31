@@ -27,6 +27,15 @@
  * is one sequential conversation and two overlapping exchanges corrupt
  * each other. See the io_lock comment in transport_serial.c.
  *
+ * Corruption detection: gcode lines streamed during a print are sent
+ * with a line number and checksum (the standard RepRap protocol, not
+ * Marlin-specific), so a bit flipped in transit gets caught and resent
+ * instead of silently executed as a different, still-valid-looking
+ * command. Negotiated automatically at connect time (via M110 N0) with a
+ * clean fallback to plain unnumbered lines for firmware that doesn't
+ * support it — see gcode_checksum()/send_checksummed_line() in
+ * transport_serial.c.
+ *
  * How to use this instead of the simulator: run the backend with
  * `--serial /dev/ttyUSB0` (or whatever your printer's device path is —
  * see main.c). Without that flag, the simulator (transport_sim.h) is used

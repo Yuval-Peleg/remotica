@@ -36,6 +36,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <termios.h>
 #include <time.h>
 #include <unistd.h>
@@ -63,6 +64,13 @@
 #define TIMEOUT_MS_NORMAL 5000
 #define TIMEOUT_MS_HOMING 30000
 #define TIMEOUT_MS_LONG_RUNNING 300000
+
+/* How many times to resend a single line before giving up on it — see
+ * send_checksummed_line() below. This driver never has more than one
+ * line outstanding at a time (it always waits for a reply before sending
+ * the next), so "resend" only ever means "send this exact same line
+ * again," never "replay the last N lines." */
+#define MAX_RESEND_ATTEMPTS 5
 
 /* Arduino-compatible boards (which is what most 3D printer mainboards
  * are) reset themselves when a serial connection is opened — this is a
@@ -104,6 +112,14 @@ typedef struct {
     pthread_mutex_t io_lock;
 
     int ticks_since_poll; /* counts up to TEMP_POLL_EVERY_N_TICKS */
+
+    /* Line-number + checksum protocol state — see the big comment on
+     * send_checksummed_line() for what this is and why. Both fields are
+     * only ever touched while io_lock is held (set once at connect time,
+     * read/advanced by every send_gcode_line call), same as everything
+     * else in this struct. */
+    int checksums_enabled; /* did the printer accept our M110 N0 at connect? */
+    long next_line_number; /* the N value the next checksummed line will use */
 } SerialImplData;
 
 /* ---------------------------------------------------------------------
@@ -180,7 +196,13 @@ static void note_error_line(const char *line) {
  * simulation of it, so the frontend's terminal view shows exactly what
  * went out over the wire. */
 static int write_line(int fd, const char *line, ConsoleLog *console) {
-    char buffer[256];
+    /* 320, not 256: send_checksummed_line() below wraps a real gcode line
+     * as "N<n> <line>*<checksum>", adding up to ~14 bytes of overhead
+     * (an 8-digit line number is enough for a print with tens of millions
+     * of lines in it). Sized so that wrapping never turns an
+     * already-fits-in-256 real gcode line into one that no longer fits
+     * here. */
+    char buffer[320];
     int written = snprintf(buffer, sizeof(buffer), "%s\n", line);
     if (written < 0 || (size_t)written >= sizeof(buffer)) {
         return -1; /* line too long for our buffer */
@@ -309,6 +331,110 @@ static int send_and_wait_for_ok(int fd, const char *line, int timeout_ms, Consol
 
     tcflush(fd, TCIFLUSH);
     return -1;
+}
+
+/* RepRap's standard line checksum: XOR of every byte in the line
+ * (everything from the start up to, but not including, the "*"). This
+ * isn't Marlin-specific — it's from the original RepRap serial protocol,
+ * and it's implemented the same way by Prusa firmware, RepRapFirmware
+ * (Duet boards), Smoothieware, Repetier-Firmware, and Klipper's host
+ * software (which supports it specifically for compatibility with hosts
+ * that always send it, which is most of them). */
+static unsigned char gcode_checksum(const char *s) {
+    unsigned char sum = 0;
+    for (; *s != '\0'; s++) {
+        sum ^= (unsigned char)*s;
+    }
+    return sum;
+}
+
+/* Sends `line` wrapped as "N<n> <line>*<checksum>" instead of bare, so
+ * the printer can actually detect a corrupted transmission instead of
+ * just executing whatever it received. Without this, a single flipped
+ * bit (USB-serial running next to stepper motors and heaters is not a
+ * quiet electrical environment) can turn one valid command into a
+ * DIFFERENT, still-perfectly-valid-looking one — "G1 X100" corrupted
+ * into "G1 X900" is not something Marlin has any way to notice on its
+ * own. A checksum mismatch (or an out-of-sequence line number) instead
+ * gets a "Resend: N<n>" reply, and this function resends the exact same
+ * line — never a later one, since this driver never has more than one
+ * line outstanding at a time — up to MAX_RESEND_ATTEMPTS times before
+ * giving up. `impl->next_line_number` only advances on success, so a run
+ * of resends keeps reusing the same N, which is exactly what the
+ * firmware expects a resend to look like.
+ *
+ * Deliberately scoped to the print-streaming path only (see
+ * serial_send_gcode_line) — not jog/home/temp. Those are already refused
+ * outright while a print is running (api_handlers.c), so they're
+ * low-volume, interactive, and any problem is immediately visible to
+ * whoever just pressed the button; an unattended multi-hour print
+ * streamed line by line with nobody watching is the case that actually
+ * needs corruption detection. Mixing checksummed print lines with plain
+ * jog/home/temp lines on the same connection is fine: Marlin only
+ * applies line-number/checksum validation to lines that actually start
+ * with "N" — anything else is processed normally regardless of whether
+ * checksums were negotiated earlier in the connection. */
+static int send_checksummed_line(int fd, SerialImplData *impl, const char *line, int timeout_ms,
+                                 ConsoleLog *console) {
+    for (int attempt = 0; attempt < MAX_RESEND_ATTEMPTS; attempt++) {
+        char numbered[330];
+        int numbered_len =
+            snprintf(numbered, sizeof(numbered), "N%ld %s", impl->next_line_number, line);
+        if (numbered_len < 0 || (size_t)numbered_len >= sizeof(numbered)) {
+            return -1; /* line too long even before the checksum suffix */
+        }
+
+        char wrapped[340];
+        int wrapped_len =
+            snprintf(wrapped, sizeof(wrapped), "%s*%u", numbered, gcode_checksum(numbered));
+        if (wrapped_len < 0 || (size_t)wrapped_len >= sizeof(wrapped)) {
+            return -1;
+        }
+
+        if (write_line(fd, wrapped, console) != 0) {
+            return -1;
+        }
+
+        struct timespec deadline;
+        deadline_init(&deadline, timeout_ms);
+
+        int got_ok = 0;
+        int got_resend = 0;
+        char reply[256];
+        while (read_line(fd, reply, sizeof(reply), &deadline, console) >= 0) {
+            if (strncmp(reply, "ok", 2) == 0) {
+                got_ok = 1;
+                break;
+            }
+            /* Marlin's actual wording is "Resend: N<n>" — checked
+             * case-insensitively since not every fork capitalizes it the
+             * same way. We don't need to parse out <n>: with only one
+             * line ever outstanding, whatever the firmware wants resent
+             * can only be the line we just sent. */
+            if (strncasecmp(reply, "resend", 6) == 0) {
+                got_resend = 1;
+                break;
+            }
+            if (is_error_line(reply)) {
+                note_error_line(reply);
+            }
+        }
+
+        if (got_ok) {
+            impl->next_line_number++;
+            return 0;
+        }
+        if (got_resend) {
+            continue; /* retry the exact same line and line number */
+        }
+
+        /* Neither "ok" nor "Resend" within the deadline — same resync
+         * reasoning as send_and_wait_for_ok's failure path. */
+        tcflush(fd, TCIFLUSH);
+        return -1;
+    }
+
+    return -1; /* kept getting "Resend" until we ran out of attempts */
 }
 
 /* Sends M115 ("firmware info") and captures the first line of whatever
@@ -440,6 +566,25 @@ static int serial_connect(PrinterDriver *self) {
     tcflush(fd, TCIOFLUSH);
 
     query_firmware_info(fd, self->console, firmware_info, sizeof(firmware_info));
+
+    /* M110 N0 tells the firmware "the next line I send will be N1" — the
+     * standard RepRap way to (re)synchronise line numbering before using
+     * checksummed lines (see send_checksummed_line). This is a NEGOTIATION,
+     * not an assumption: firmware that doesn't understand line numbers/
+     * checksums at all will fail to answer this cleanly (an error, a
+     * "Resend", or just a timeout, since M110 itself isn't checksummed
+     * here and firmware in checksum-required-mode would ask us to resend
+     * it) rather than a plain "ok". Falling back to checksums_enabled = 0
+     * in that case is exactly today's behaviour — bare, unnumbered
+     * lines — so a firmware that doesn't support this protocol is no
+     * worse off than before this feature existed, and only a firmware
+     * that does support it (which is most of the Marlin-descended and
+     * RepRap-protocol family — see gcode_checksum's comment) actually
+     * gets the added corruption detection. */
+    impl->checksums_enabled =
+        (send_and_wait_for_ok(fd, "M110 N0", TIMEOUT_MS_NORMAL, self->console) == 0);
+    impl->next_line_number = 1;
+
     pthread_mutex_unlock(&impl->io_lock);
 
     printer_state_lock(self->state);
@@ -750,7 +895,10 @@ static int serial_send_gcode_line(PrinterDriver *self, const char *line) {
         pthread_mutex_unlock(&impl->io_lock);
         return -1; /* not connected */
     }
-    int result = send_and_wait_for_ok(impl->fd, line, command_timeout_ms(line), self->console);
+    int timeout_ms = command_timeout_ms(line);
+    int result = impl->checksums_enabled
+                     ? send_checksummed_line(impl->fd, impl, line, timeout_ms, self->console)
+                     : send_and_wait_for_ok(impl->fd, line, timeout_ms, self->console);
     pthread_mutex_unlock(&impl->io_lock);
 
     return result;
@@ -770,6 +918,8 @@ PrinterDriver *transport_serial_create(PrinterState *state, ConsoleLog *console,
     impl->device_path[sizeof(impl->device_path) - 1] = '\0';
     impl->fd = -1;
     impl->ticks_since_poll = 0;
+    impl->checksums_enabled = 0; /* real value decided by serial_connect's M110 negotiation */
+    impl->next_line_number = 1;
     pthread_mutex_init(&impl->io_lock, NULL);
 
     PrinterDriver *driver = malloc(sizeof(PrinterDriver));
