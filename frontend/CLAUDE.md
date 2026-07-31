@@ -33,5 +33,5 @@ All in `src/index.css`, custom dark-only theme (no light mode) mapped into a Tai
 ## Conventions
 
 - No new features/pages/content without asking first — this has been explicit from the user throughout. Visual/tooling improvements to existing content are fine to proceed on directly.
-- No code comments unless the *why* is genuinely non-obvious (a workaround, a hidden constraint) — not what the code does.
+- No code comments unless the _why_ is genuinely non-obvious (a workaround, a hidden constraint) — not what the code does.
 - All printer/job state here is mock data until the backend exists — see root `CLAUDE.md` for the backend plan and what needs to flip from mock to real.

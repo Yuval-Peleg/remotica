@@ -11,4 +11,12 @@ export default defineConfig({
       "@": path.resolve(import.meta.dirname, "./src"),
     },
   },
+  server: {
+    // Forward API calls to the C backend during development. In
+    // production the backend serves the built frontend itself, so
+    // requests to /api are already same-origin and this isn't needed.
+    proxy: {
+      "/api": "http://localhost:8080",
+    },
+  },
 });

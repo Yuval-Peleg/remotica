@@ -8,6 +8,7 @@ import { ControlPanel } from "@/components/control/ControlPanel";
 import { TemperatureGraph } from "@/components/control/TemperatureGraph";
 import { ConnectionStatus } from "@/components/dashboard/ConnectionStatus";
 import { GcodeDropzone } from "@/components/dashboard/GcodeDropzone";
+import { BackendConnectionTest } from "@/components/dashboard/BackendConnectionTest";
 import { usePrinterTemps } from "@/hooks/use-printer-temps";
 import { useGcodeFile } from "@/hooks/use-gcode-file";
 import { formatDurationShort } from "@/lib/gcode-print-time";
@@ -150,6 +151,8 @@ export function Dashboard() {
             />
           </CardContent>
         </Card>
+
+        <BackendConnectionTest />
       </section>
     </main>
   );
