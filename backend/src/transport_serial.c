@@ -167,6 +167,14 @@ typedef struct {
      * else in this struct. */
     int checksums_enabled; /* did the printer accept our M110 N0 at connect? */
     long next_line_number; /* the N value the next checksummed line will use */
+
+    /* If this driver was created via transport_serial_create_from_
+     * discovery(), `fd` already holds an open, booted, past-its-M115-
+     * query connection at creation time (instead of the usual -1), and
+     * this holds the firmware info that query already captured — read
+     * once by serial_connect() on the "already open" path and otherwise
+     * unused. Empty string for a driver created the normal way. */
+    char pending_firmware_info[256];
 } SerialImplData;
 
 /* ---------------------------------------------------------------------
@@ -484,48 +492,57 @@ static int send_checksummed_line(int fd, SerialImplData *impl, const char *line,
     return -1; /* kept getting "Resend" until we ran out of attempts */
 }
 
-/* Sends M115 ("firmware info") and captures the first line of whatever
- * comes back before "ok", writing it into `out` (left as an empty string
- * if the printer doesn't reply in time, or replies with just "ok" and
- * nothing else). This is a BEST-EFFORT hint, not reliable identification
- * — see the big comment on PrinterState's firmware_info field for why.
- * Real Marlin's M115 reply normally looks like:
- *   FIRMWARE_NAME:Marlin 2.0.9.2 ... MACHINE_TYPE:... EXTRUDER_COUNT:1 ...
- *   ok
- * i.e. one info line, then a separate "ok" — this keeps that first line
- * and then keeps reading (and discarding) until "ok" or a timeout, so a
- * slow/chatty firmware doesn't leave leftover bytes sitting in the read
- * buffer for the next real command to trip over. */
-static void query_firmware_info(int fd, ConsoleLog *console, char *out, size_t out_size) {
+/* Sends M115 ("firmware info") and captures the most useful line of
+ * whatever comes back before "ok" into `out` (left as an empty string if
+ * the printer never replies with anything at all). This is a
+ * BEST-EFFORT hint, not reliable identification — see the big comment on
+ * PrinterState's firmware_info field for why.
+ *
+ * Originally this just kept the FIRST non-"ok" reply line, on the
+ * assumption that would be the actual FIRMWARE_NAME:... info line — true
+ * for a simple M115 reply, but a real Ender 3 (Marlin 2.1.2.4) sends an
+ * unrelated "echo:SD card ok" line BEFORE the real M115 response, which
+ * got captured instead of anything useful. Now specifically looks for a
+ * line containing "FIRMWARE_NAME:" — the one thing every Marlin-family
+ * M115 reply is expected to include — and only falls back to the first
+ * line seen if no such line ever turns up, so firmware that formats its
+ * reply differently still gets SOME hint rather than nothing.
+ *
+ * Also measured directly against that same Ender 3: a real M115 reply
+ * can run to dozens of lines (Marlin 2.x's extended "Cap:" capability
+ * report) and take several real seconds to fully arrive — this keeps
+ * reading (and discarding anything not useful) until "ok" or
+ * TIMEOUT_MS_FIRMWARE_INFO, not just the first line, so a slow/chatty
+ * firmware doesn't leave leftover bytes sitting in the read buffer for
+ * the next real command to trip over.
+ *
+ * Returns 1 if the printer replied with anything at all (even a bare
+ * "ok" with no other lines), 0 if nothing came back before the deadline
+ * — used by callers that need to know "is anything actually there",
+ * separately from whatever ended up in `out`. */
+static int query_firmware_info(int fd, ConsoleLog *console, char *out, size_t out_size) {
     out[0] = '\0';
 
     if (write_line(fd, "M115", console) != 0) {
-        return;
+        return 0;
     }
 
     struct timespec deadline;
     deadline_init(&deadline, TIMEOUT_MS_FIRMWARE_INFO);
 
-    /* Originally this just kept the FIRST non-"ok" reply line, on the
-     * assumption that would be the actual FIRMWARE_NAME:... info line —
-     * true for a simple M115 reply, but a real Ender 3 (Marlin 2.1.2.4)
-     * sends an unrelated "echo:SD card ok" line BEFORE the real M115
-     * response, which got captured instead of anything useful. Now
-     * specifically looks for a line containing "FIRMWARE_NAME:" — the
-     * one thing every Marlin-family M115 reply is expected to include —
-     * and only falls back to the first line seen if no such line ever
-     * turns up, so firmware that formats its reply differently still
-     * gets SOME hint rather than nothing. */
     char reply[256];
     char first_line[256];
     first_line[0] = '\0';
+    int got_any_reply = 0;
 
     while (read_line(fd, reply, sizeof(reply), &deadline, console) >= 0) {
+        got_any_reply = 1;
+
         if (strncmp(reply, "ok", 2) == 0) {
             if (out[0] == '\0' && first_line[0] != '\0') {
                 snprintf(out, out_size, "%s", first_line);
             }
-            return;
+            return 1;
         }
         if (is_error_line(reply)) {
             note_error_line(reply);
@@ -546,12 +563,14 @@ static void query_firmware_info(int fd, ConsoleLog *console, char *out, size_t o
 
     /* Deadline hit without ever seeing "ok" — same fallback as above, and
      * same resync reasoning as send_and_wait_for_ok's failure path: we're
-     * leaving without having consumed M115's "ok", so drop anything still
-     * in flight rather than let it ack somebody else's command later. */
+     * leaving without having consumed M115's "ok" (if anything arrived at
+     * all), so drop anything still in flight rather than let it ack
+     * somebody else's command later. */
     if (out[0] == '\0' && first_line[0] != '\0') {
         snprintf(out, out_size, "%s", first_line);
     }
     tcflush(fd, TCIFLUSH);
+    return got_any_reply;
 }
 
 /* Looks up the termios speed_t constant for a human baud number (e.g.
@@ -641,15 +660,27 @@ static int open_and_configure(const char *device_path, long baud, int *out_fd) {
 }
 
 /* Tries `device_path` at `baud`: opens and configures it, waits out the
- * usual boot reset, flushes the boot banner, sends an M115 query, and
- * checks whether ANYTHING coherent comes back within
- * DISCOVERY_PROBE_TIMEOUT_MS. Always closes the fd before returning —
- * this is only ever used to answer "does something that talks back like
- * a printer live here", the real connection re-opens the winning device
- * properly via transport_serial_create() afterward. Returns 1 if
- * something replied, 0 otherwise (wrong device, wrong baud, or nothing
- * plugged in at all). */
-static int probe_device(const char *device_path, long baud, ConsoleLog *console) {
+ * usual boot reset, and queries firmware info (reusing
+ * query_firmware_info() rather than a separate hand-rolled M115
+ * exchange, so probing and a real connect's firmware query can never
+ * drift out of sync with each other).
+ *
+ * On success (something replied), the fd is left OPEN — not closed —
+ * and handed back via *out_fd, along with whatever firmware info came
+ * back via out_firmware_info. That's deliberate: this exact, already-
+ * open, already-past-its-boot-reset-and-M115-wait connection gets handed
+ * straight to transport_serial_create_from_discovery() by the caller, on
+ * the winning candidate, so the real connection doesn't pay for a SECOND
+ * DTR-triggered reset and a second multi-second M115 wait on top of the
+ * one discovery already did — roughly halving how long --serial auto
+ * takes end to end compared to probing, throwing the connection away,
+ * and reconnecting from scratch.
+ *
+ * On failure, the fd is closed before returning, so the caller never has
+ * to worry about cleanup either way. Returns 1 on success, 0 otherwise
+ * (wrong device, wrong baud, or nothing plugged in at all). */
+static int probe_device(const char *device_path, long baud, ConsoleLog *console, int *out_fd,
+                        char *out_firmware_info, size_t firmware_info_size) {
     int fd;
     if (open_and_configure(device_path, baud, &fd) != 0) {
         return 0;
@@ -658,17 +689,13 @@ static int probe_device(const char *device_path, long baud, ConsoleLog *console)
     sleep(BOOT_WAIT_SECONDS);
     tcflush(fd, TCIOFLUSH);
 
-    int replied = 0;
-    if (write_line(fd, "M115", console) == 0) {
-        struct timespec deadline;
-        deadline_init(&deadline, DISCOVERY_PROBE_TIMEOUT_MS);
-        char reply[256];
-        replied = (read_line(fd, reply, sizeof(reply), &deadline, console) >= 0);
+    if (!query_firmware_info(fd, console, out_firmware_info, firmware_info_size)) {
+        close(fd);
+        return 0;
     }
 
-    tcflush(fd, TCIFLUSH);
-    close(fd);
-    return replied;
+    *out_fd = fd;
+    return 1;
 }
 
 int transport_serial_discover(ConsoleLog *console, SerialDiscoveryResult *out) {
@@ -696,9 +723,12 @@ int transport_serial_discover(ConsoleLog *console, SerialDiscoveryResult *out) {
                 printf("  trying %s at %ld baud...\n", path, baud);
                 fflush(stdout);
 
-                if (probe_device(path, baud, console)) {
+                int fd;
+                if (probe_device(path, baud, console, &fd, out->firmware_info,
+                                 sizeof(out->firmware_info))) {
                     snprintf(out->device_path, sizeof(out->device_path), "%s", path);
                     out->baud_rate = baud;
+                    out->fd = fd;
                     globfree(&matches);
                     return 1;
                 }
@@ -718,36 +748,51 @@ int transport_serial_discover(ConsoleLog *console, SerialDiscoveryResult *out) {
 static int serial_connect(PrinterDriver *self) {
     SerialImplData *impl = (SerialImplData *)self->impl_data;
 
-    int fd;
-    if (open_and_configure(impl->device_path, impl->baud_rate, &fd) != 0) {
-        fprintf(stderr, "Failed to open/configure serial port %s: %s\n", impl->device_path,
-                strerror(errno));
-        return -1;
-    }
-
     /* Queried into a local buffer first (not directly into the shared
      * state) because it involves real serial I/O with multi-second
      * timeouts — same "don't hold the lock during slow work" reasoning
      * as printer_state_to_json(). */
     char firmware_info[sizeof(((PrinterState *)0)->firmware_info)];
 
-    pthread_mutex_lock(&impl->io_lock);
-    impl->fd = fd;
+    if (impl->fd >= 0) {
+        /* Created via transport_serial_create_from_discovery(): this fd
+         * is ALREADY open, already past its boot-reset wait, and already
+         * answered an M115 query (that's how transport_serial_discover()
+         * confirmed it was worth connecting to in the first place) — see
+         * impl->pending_firmware_info's comment. Reusing it here, instead
+         * of closing it and opening a fresh connection from scratch,
+         * skips a second DTR-triggered reset and a second multi-second
+         * M115 wait, which is the whole point: it roughly halves how
+         * long --serial auto takes end to end. */
+        snprintf(firmware_info, sizeof(firmware_info), "%s", impl->pending_firmware_info);
+        pthread_mutex_lock(&impl->io_lock);
+    } else {
+        int fd;
+        if (open_and_configure(impl->device_path, impl->baud_rate, &fd) != 0) {
+            fprintf(stderr, "Failed to open/configure serial port %s: %s\n", impl->device_path,
+                    strerror(errno));
+            return -1;
+        }
 
-    /* See the BOOT_WAIT_SECONDS comment above: most printer mainboards
-     * reset when the port opens, so give the firmware time to finish
-     * booting before we start sending it commands. */
-    sleep(BOOT_WAIT_SECONDS);
+        pthread_mutex_lock(&impl->io_lock);
+        impl->fd = fd;
 
-    /* Discard whatever the board said while it was booting. This has to
-     * happen AFTER the sleep, not before it: the reset is triggered by
-     * our own open() a moment ago, so at this point in the function the
-     * boot banner ("start", version strings, SD-card chatter) hasn't been
-     * sent yet — flushing first would flush an empty buffer and leave all
-     * of it to be misread as replies to our first real command. */
-    tcflush(fd, TCIOFLUSH);
+        /* See the BOOT_WAIT_SECONDS comment above: most printer
+         * mainboards reset when the port opens, so give the firmware
+         * time to finish booting before we start sending it commands. */
+        sleep(BOOT_WAIT_SECONDS);
 
-    query_firmware_info(fd, self->console, firmware_info, sizeof(firmware_info));
+        /* Discard whatever the board said while it was booting. This has
+         * to happen AFTER the sleep, not before it: the reset is
+         * triggered by our own open() a moment ago, so at this point in
+         * the function the boot banner ("start", version strings,
+         * SD-card chatter) hasn't been sent yet — flushing first would
+         * flush an empty buffer and leave all of it to be misread as
+         * replies to our first real command. */
+        tcflush(fd, TCIOFLUSH);
+
+        query_firmware_info(fd, self->console, firmware_info, sizeof(firmware_info));
+    }
 
     /* M110 N0 tells the firmware "the next line I send will be N1" — the
      * standard RepRap way to (re)synchronise line numbering before using
@@ -764,7 +809,7 @@ static int serial_connect(PrinterDriver *self) {
      * RepRap-protocol family — see gcode_checksum's comment) actually
      * gets the added corruption detection. */
     impl->checksums_enabled =
-        (send_and_wait_for_ok(fd, "M110 N0", TIMEOUT_MS_NORMAL, self->console) == 0);
+        (send_and_wait_for_ok(impl->fd, "M110 N0", TIMEOUT_MS_NORMAL, self->console) == 0);
     impl->next_line_number = 1;
 
     pthread_mutex_unlock(&impl->io_lock);
@@ -1086,8 +1131,13 @@ static int serial_send_gcode_line(PrinterDriver *self, const char *line) {
     return result;
 }
 
-PrinterDriver *transport_serial_create(PrinterState *state, ConsoleLog *console,
-                                       const char *device_path, long baud_rate) {
+/* Shared setup between transport_serial_create() and
+ * transport_serial_create_from_discovery() — the two differ only in
+ * what impl->fd and impl->pending_firmware_info start as, which each
+ * caller sets itself afterward. Returns NULL (having freed anything
+ * already allocated) on failure, same as both public functions. */
+static PrinterDriver *alloc_serial_driver(PrinterState *state, ConsoleLog *console,
+                                          const char *device_path, long baud_rate) {
     if (strlen(device_path) >= sizeof(((SerialImplData *)0)->device_path)) {
         return NULL; /* device path too long for our fixed-size buffer */
     }
@@ -1103,6 +1153,7 @@ PrinterDriver *transport_serial_create(PrinterState *state, ConsoleLog *console,
     impl->ticks_since_poll = 0;
     impl->checksums_enabled = 0; /* real value decided by serial_connect's M110 negotiation */
     impl->next_line_number = 1;
+    impl->pending_firmware_info[0] = '\0';
     pthread_mutex_init(&impl->io_lock, NULL);
 
     PrinterDriver *driver = malloc(sizeof(PrinterDriver));
@@ -1122,6 +1173,28 @@ PrinterDriver *transport_serial_create(PrinterState *state, ConsoleLog *console,
     driver->impl_data = impl;
     driver->state = state;
     driver->console = console;
+
+    return driver;
+}
+
+PrinterDriver *transport_serial_create(PrinterState *state, ConsoleLog *console,
+                                       const char *device_path, long baud_rate) {
+    return alloc_serial_driver(state, console, device_path, baud_rate);
+}
+
+PrinterDriver *transport_serial_create_from_discovery(PrinterState *state, ConsoleLog *console,
+                                                      const char *device_path, long baud_rate,
+                                                      int fd, const char *firmware_info) {
+    PrinterDriver *driver = alloc_serial_driver(state, console, device_path, baud_rate);
+    if (driver == NULL) {
+        /* Documented to always take ownership of fd, success or not. */
+        close(fd);
+        return NULL;
+    }
+
+    SerialImplData *impl = (SerialImplData *)driver->impl_data;
+    impl->fd = fd;
+    snprintf(impl->pending_firmware_info, sizeof(impl->pending_firmware_info), "%s", firmware_info);
 
     return driver;
 }

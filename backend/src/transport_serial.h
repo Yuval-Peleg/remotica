@@ -72,14 +72,25 @@ struct ConsoleLog;
 PrinterDriver *transport_serial_create(PrinterState *state, struct ConsoleLog *console,
                                        const char *device_path, long baud_rate);
 
-/* Disconnects (if still connected) and frees a driver created by
- * transport_serial_create(). */
+/* Disconnects (if still connected) and frees a driver created by either
+ * transport_serial_create() or transport_serial_create_from_discovery(). */
 void transport_serial_destroy(PrinterDriver *driver);
 
-/* What device path and baud rate transport_serial_discover() found. */
+/* What transport_serial_discover() found: where it is, what baud rate
+ * answered, and — since discovery already has to open the device, wait
+ * out its boot reset, and query its firmware info just to confirm it's
+ * really there — the already-open file descriptor and the firmware info
+ * already captured along the way, so a real connect afterward doesn't
+ * have to redo any of that (see transport_serial_create_from_discovery
+ * below). `fd` is only meaningful/open when transport_serial_discover()
+ * returned 1; whoever receives a successful result owns it and must
+ * either hand it to transport_serial_create_from_discovery() or close()
+ * it themselves. */
 typedef struct {
     char device_path[64];
     long baud_rate;
+    char firmware_info[256];
+    int fd;
 } SerialDiscoveryResult;
 
 /* Scans /dev/ttyACM* and /dev/ttyUSB* (the usual places a 3D printer's
@@ -101,5 +112,25 @@ typedef struct {
  *
  * Returns 1 and fills `*out` on success, 0 if nothing answered. */
 int transport_serial_discover(struct ConsoleLog *console, SerialDiscoveryResult *out);
+
+/* Same as transport_serial_create(), but for a device
+ * transport_serial_discover() already opened, booted, and queried —
+ * hands the driver that exact already-open fd and already-known
+ * firmware info directly instead of opening a second, separate
+ * connection from scratch. This is what makes --serial auto only pay
+ * for ONE DTR-triggered reset and ONE multi-second M115 wait instead of
+ * two (one during discovery, one again during the "real" connect) —
+ * see the io_lock/fd comment on serial_connect() in transport_serial.c
+ * for exactly how the reuse works.
+ *
+ * Takes ownership of `fd` unconditionally: on success it's used for the
+ * driver's connection, and on failure (e.g. out of memory) it's closed
+ * before returning — the caller must not touch or close(fd) themselves
+ * either way, and must not pass the same fd to more than one create
+ * call. Returns NULL if device_path is too long to store. */
+PrinterDriver *transport_serial_create_from_discovery(PrinterState *state,
+                                                      struct ConsoleLog *console,
+                                                      const char *device_path, long baud_rate,
+                                                      int fd, const char *firmware_info);
 
 #endif /* REMOTICA_TRANSPORT_SERIAL_H */

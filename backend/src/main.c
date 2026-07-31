@@ -138,6 +138,13 @@ int main(int argc, char **argv) {
         char discovered_path[64];
         const char *device_to_use = serial_device;
         long baud_rate = SERIAL_BAUD_RATE_DEFAULT;
+        /* Set (to a value >= 0) only when discovery found a printer —
+         * that already-open, already-booted, already-M115-queried fd
+         * gets handed straight to transport_serial_create_from_discovery
+         * below instead of opening (and re-booting, and re-querying) the
+         * same device a second time from scratch. */
+        int discovered_fd = -1;
+        char discovered_firmware_info[256] = "";
 
         if (strcmp(serial_device, "auto") == 0) {
             printf("Scanning for a connected printer (--serial auto)...\n");
@@ -157,10 +164,17 @@ int main(int argc, char **argv) {
             snprintf(discovered_path, sizeof(discovered_path), "%s", discovered.device_path);
             device_to_use = discovered_path;
             baud_rate = discovered.baud_rate;
+            discovered_fd = discovered.fd;
+            snprintf(discovered_firmware_info, sizeof(discovered_firmware_info), "%s",
+                     discovered.firmware_info);
             printf("Found a printer at %s (%ld baud).\n", device_to_use, baud_rate);
         }
 
-        driver = transport_serial_create(&state, &console, device_to_use, baud_rate);
+        driver =
+            (discovered_fd >= 0)
+                ? transport_serial_create_from_discovery(&state, &console, device_to_use, baud_rate,
+                                                         discovered_fd, discovered_firmware_info)
+                : transport_serial_create(&state, &console, device_to_use, baud_rate);
         if (driver == NULL) {
             fprintf(stderr, "Failed to create serial driver for %s\n", device_to_use);
             return 1;
