@@ -101,11 +101,14 @@ int main(int argc, char **argv) {
     /* --- 1. Command-line arguments --- */
 
     /* If --serial <device> is given, we'll talk to a real printer over
-     * that serial device (e.g. --serial /dev/ttyUSB0). Otherwise we
-     * default to the simulator, which is the safe choice and doesn't
-     * require any hardware — see transport_serial.h for an important
-     * warning about the serial driver being untested against real
-     * hardware before you reach for --serial. */
+     * that serial device (e.g. --serial /dev/ttyUSB0). --serial auto
+     * instead has the backend scan for one itself (see
+     * transport_serial_discover()) rather than needing an exact device
+     * path up front. Without --serial at all, we default to the
+     * simulator, which is the safe choice and doesn't require any
+     * hardware — see transport_serial.h for an important warning about
+     * the serial driver being untested against real hardware before you
+     * reach for --serial. */
     const char *serial_device = NULL;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--serial") == 0 && i + 1 < argc) {
@@ -132,14 +135,39 @@ int main(int argc, char **argv) {
 
     PrinterDriver *driver;
     if (serial_device != NULL) {
-        driver = transport_serial_create(&state, &console, serial_device);
+        char discovered_path[64];
+        const char *device_to_use = serial_device;
+        long baud_rate = SERIAL_BAUD_RATE_DEFAULT;
+
+        if (strcmp(serial_device, "auto") == 0) {
+            printf("Scanning for a connected printer (--serial auto)...\n");
+            fflush(stdout); /* stdout is fully buffered once it's not a
+                             * terminal (e.g. captured by a parent
+                             * process), so without this, this message
+                             * could print AFTER a subsequent
+                             * fprintf(stderr, ...) even though it
+                             * happened first — stderr is unbuffered. */
+            SerialDiscoveryResult discovered;
+            if (!transport_serial_discover(&console, &discovered)) {
+                fprintf(stderr, "No printer found automatically on /dev/ttyACM* or "
+                                "/dev/ttyUSB*. Plug it in, or pass an explicit --serial "
+                                "<device> instead.\n");
+                return 1;
+            }
+            snprintf(discovered_path, sizeof(discovered_path), "%s", discovered.device_path);
+            device_to_use = discovered_path;
+            baud_rate = discovered.baud_rate;
+            printf("Found a printer at %s (%ld baud).\n", device_to_use, baud_rate);
+        }
+
+        driver = transport_serial_create(&state, &console, device_to_use, baud_rate);
         if (driver == NULL) {
-            fprintf(stderr, "Failed to create serial driver for %s\n", serial_device);
+            fprintf(stderr, "Failed to create serial driver for %s\n", device_to_use);
             return 1;
         }
-        printf("Using the REAL serial driver on %s (untested against hardware — see\n"
-               "transport_serial.h for details before trusting this with a real printer).\n",
-               serial_device);
+        printf("Using the REAL serial driver on %s at %ld baud (untested against hardware —\n"
+               "see transport_serial.h for details before trusting this with a real printer).\n",
+               device_to_use, baud_rate);
     } else {
         driver = transport_sim_create(&state, &console);
         if (driver == NULL) {

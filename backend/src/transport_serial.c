@@ -30,6 +30,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <glob.h>
 #include <limits.h>
 #include <poll.h>
 #include <pthread.h>
@@ -43,10 +44,35 @@
 
 #include "console_log.h"
 
-/* Most Marlin-based printers default to 115200 baud. Some (especially
- * newer 32-bit boards) use 250000 instead — if this doesn't work with a
- * particular printer, that's the first thing to check and change. */
-#define SERIAL_BAUD_RATE B115200
+/* The baud rates this driver knows how to try. Just one for now: 115200,
+ * the standard rate for essentially every 8-bit Marlin board and this
+ * driver's only baud rate since it was first written. Some newer 32-bit
+ * boards default to 250000 instead, which would be worth adding here —
+ * but there's no standard POSIX Bxxxx constant for it (checked: Linux's
+ * own termios headers go from B230400 straight to B460800), so
+ * supporting it needs Linux's separate termios2/BOTHER ioctl mechanism
+ * for arbitrary custom rates, which isn't implemented here yet. Rather
+ * than list a baud rate that would silently fail to actually configure
+ * the port, this table only contains rates that are genuinely supported.
+ * `baud` is the plain human number (what gets logged, compared, and
+ * passed around); `termios_speed` is the opaque B-constant termios
+ * itself wants — not the literal numeric baud rate, a separately encoded
+ * value. Both transport_serial_create() and transport_serial_discover()
+ * use this same table, so they can never disagree about what baud rates
+ * exist. */
+static const struct {
+    long baud;
+    speed_t termios_speed;
+} BAUD_RATE_OPTIONS[] = {
+    {115200, B115200},
+};
+
+/* How long a discovery probe waits for a reply from one candidate device
+ * at one candidate baud rate before giving up and moving on — much
+ * shorter than TIMEOUT_MS_NORMAL, since discovery may need to try several
+ * device/baud combinations and each one that ISN'T the printer needs to
+ * fail fast for the whole scan to finish in a reasonable time. */
+#define DISCOVERY_PROBE_TIMEOUT_MS 1500
 
 /* How long to wait for "ok" after different kinds of commands. Homing can
  * take a long time (the printer physically has to reach its limit
@@ -89,7 +115,8 @@
  * inside this struct (see the `void *impl_data` comment in transport.h). */
 typedef struct {
     char device_path[64];
-    int fd; /* the open serial port, or -1 if not connected */
+    long baud_rate; /* plain human number, e.g. 115200 — see BAUD_RATE_OPTIONS */
+    int fd;         /* the open serial port, or -1 if not connected */
 
     /* A serial port is a single, strictly sequential conversation: one
      * command out, one "ok" back, and nothing may interleave in between.
@@ -484,13 +511,28 @@ static void query_firmware_info(int fd, ConsoleLog *console, char *out, size_t o
     tcflush(fd, TCIFLUSH);
 }
 
-/* ---------------------------------------------------------------------
- * PrinterDriver function implementations
- * --------------------------------------------------------------------- */
+/* Looks up the termios speed_t constant for a human baud number (e.g.
+ * 115200), falling back to the more common of the two if `baud` isn't
+ * one we recognize — should never actually happen, since every caller
+ * gets `baud` from BAUD_RATE_OPTIONS in the first place, but a function
+ * that returns a speed_t has to return SOMETHING. */
+static speed_t baud_to_termios_speed(long baud) {
+    for (size_t i = 0; i < sizeof(BAUD_RATE_OPTIONS) / sizeof(BAUD_RATE_OPTIONS[0]); i++) {
+        if (BAUD_RATE_OPTIONS[i].baud == baud) {
+            return BAUD_RATE_OPTIONS[i].termios_speed;
+        }
+    }
+    return B115200;
+}
 
-static int serial_connect(PrinterDriver *self) {
-    SerialImplData *impl = (SerialImplData *)self->impl_data;
-
+/* Opens `device_path` and configures it as a raw serial port at `baud`.
+ * Shared by serial_connect() (the real, final connection) and
+ * transport_serial_discover()'s probing below — both need exactly the
+ * same open/termios dance, just for different reasons. On success writes
+ * the new fd to *out_fd and returns 0; on any failure returns -1 having
+ * already closed anything it opened, so callers never have to clean up
+ * a partially-configured fd themselves. */
+static int open_and_configure(const char *device_path, long baud, int *out_fd) {
     /* O_NOCTTY: don't let this serial port become our process's
      * "controlling terminal" (it isn't one, and letting the OS treat it
      * like one can cause weird signal-related surprises).
@@ -498,9 +540,8 @@ static int serial_connect(PrinterDriver *self) {
      * while waiting for a carrier-detect signal that serial-over-USB
      * adapters don't really use — we immediately switch to the blocking
      * mode we actually want below. */
-    int fd = open(impl->device_path, O_RDWR | O_NOCTTY | O_NONBLOCK);
+    int fd = open(device_path, O_RDWR | O_NOCTTY | O_NONBLOCK);
     if (fd < 0) {
-        fprintf(stderr, "Failed to open serial port %s: %s\n", impl->device_path, strerror(errno));
         return -1;
     }
 
@@ -512,14 +553,13 @@ static int serial_connect(PrinterDriver *self) {
 
     struct termios options;
     if (tcgetattr(fd, &options) != 0) {
-        fprintf(stderr, "Failed to read serial port settings for %s: %s\n", impl->device_path,
-                strerror(errno));
         close(fd);
         return -1;
     }
 
-    cfsetispeed(&options, SERIAL_BAUD_RATE);
-    cfsetospeed(&options, SERIAL_BAUD_RATE);
+    speed_t termios_speed = baud_to_termios_speed(baud);
+    cfsetispeed(&options, termios_speed);
+    cfsetospeed(&options, termios_speed);
 
     /* "Raw mode": no line-editing, no character translation, no special
      * handling of control characters — we want exactly the bytes the
@@ -537,9 +577,96 @@ static int serial_connect(PrinterDriver *self) {
     options.c_cc[VTIME] = 0;
 
     if (tcsetattr(fd, TCSANOW, &options) != 0) {
-        fprintf(stderr, "Failed to configure serial port %s: %s\n", impl->device_path,
-                strerror(errno));
         close(fd);
+        return -1;
+    }
+
+    *out_fd = fd;
+    return 0;
+}
+
+/* Tries `device_path` at `baud`: opens and configures it, waits out the
+ * usual boot reset, flushes the boot banner, sends an M115 query, and
+ * checks whether ANYTHING coherent comes back within
+ * DISCOVERY_PROBE_TIMEOUT_MS. Always closes the fd before returning —
+ * this is only ever used to answer "does something that talks back like
+ * a printer live here", the real connection re-opens the winning device
+ * properly via transport_serial_create() afterward. Returns 1 if
+ * something replied, 0 otherwise (wrong device, wrong baud, or nothing
+ * plugged in at all). */
+static int probe_device(const char *device_path, long baud, ConsoleLog *console) {
+    int fd;
+    if (open_and_configure(device_path, baud, &fd) != 0) {
+        return 0;
+    }
+
+    sleep(BOOT_WAIT_SECONDS);
+    tcflush(fd, TCIOFLUSH);
+
+    int replied = 0;
+    if (write_line(fd, "M115", console) == 0) {
+        struct timespec deadline;
+        deadline_init(&deadline, DISCOVERY_PROBE_TIMEOUT_MS);
+        char reply[256];
+        replied = (read_line(fd, reply, sizeof(reply), &deadline, console) >= 0);
+    }
+
+    tcflush(fd, TCIFLUSH);
+    close(fd);
+    return replied;
+}
+
+int transport_serial_discover(ConsoleLog *console, SerialDiscoveryResult *out) {
+    static const char *const globs[] = {"/dev/ttyACM*", "/dev/ttyUSB*"};
+
+    for (size_t g = 0; g < sizeof(globs) / sizeof(globs[0]); g++) {
+        /* Zero-initialized so that globfree() below is always safe to
+         * call, even if glob() fails (GLOB_NOMATCH or otherwise) without
+         * touching gl_pathc/gl_pathv at all — neither POSIX nor glibc's
+         * own man page promises those fields are left in any particular
+         * state on failure, so relying on that would risk globfree()
+         * later free()ing garbage stack memory. gl_pathc = 0 and
+         * gl_pathv = NULL makes it a safe no-op regardless. */
+        glob_t matches = {0};
+        if (glob(globs[g], 0, NULL, &matches) != 0) {
+            globfree(&matches);
+            continue; /* no matches for this pattern, or glob() itself failed — either way, next */
+        }
+
+        for (size_t i = 0; i < matches.gl_pathc; i++) {
+            const char *path = matches.gl_pathv[i];
+
+            for (size_t b = 0; b < sizeof(BAUD_RATE_OPTIONS) / sizeof(BAUD_RATE_OPTIONS[0]); b++) {
+                long baud = BAUD_RATE_OPTIONS[b].baud;
+                printf("  trying %s at %ld baud...\n", path, baud);
+                fflush(stdout);
+
+                if (probe_device(path, baud, console)) {
+                    snprintf(out->device_path, sizeof(out->device_path), "%s", path);
+                    out->baud_rate = baud;
+                    globfree(&matches);
+                    return 1;
+                }
+            }
+        }
+
+        globfree(&matches);
+    }
+
+    return 0;
+}
+
+/* ---------------------------------------------------------------------
+ * PrinterDriver function implementations
+ * --------------------------------------------------------------------- */
+
+static int serial_connect(PrinterDriver *self) {
+    SerialImplData *impl = (SerialImplData *)self->impl_data;
+
+    int fd;
+    if (open_and_configure(impl->device_path, impl->baud_rate, &fd) != 0) {
+        fprintf(stderr, "Failed to open/configure serial port %s: %s\n", impl->device_path,
+                strerror(errno));
         return -1;
     }
 
@@ -905,7 +1032,7 @@ static int serial_send_gcode_line(PrinterDriver *self, const char *line) {
 }
 
 PrinterDriver *transport_serial_create(PrinterState *state, ConsoleLog *console,
-                                       const char *device_path) {
+                                       const char *device_path, long baud_rate) {
     if (strlen(device_path) >= sizeof(((SerialImplData *)0)->device_path)) {
         return NULL; /* device path too long for our fixed-size buffer */
     }
@@ -916,6 +1043,7 @@ PrinterDriver *transport_serial_create(PrinterState *state, ConsoleLog *console,
     }
     strncpy(impl->device_path, device_path, sizeof(impl->device_path) - 1);
     impl->device_path[sizeof(impl->device_path) - 1] = '\0';
+    impl->baud_rate = baud_rate;
     impl->fd = -1;
     impl->ticks_since_poll = 0;
     impl->checksums_enabled = 0; /* real value decided by serial_connect's M110 negotiation */
