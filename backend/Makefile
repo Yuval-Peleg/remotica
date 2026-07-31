@@ -8,7 +8,11 @@ CJSON_DIR := $(THIRD_PARTY)/cjson
 
 INCLUDES := -I$(CIVETWEB_DIR)/include -I$(CIVETWEB_DIR)/src -I$(CJSON_DIR)
 
-SRCS := src/main.c $(CIVETWEB_DIR)/src/civetweb.c $(CJSON_DIR)/cJSON.c
+# Every .c file under src/ (our own code) plus the two vendored libraries.
+# Using a wildcard here instead of listing each file means adding a new
+# src/*.c file is picked up automatically next build, no Makefile edit
+# needed.
+SRCS := $(wildcard src/*.c) $(CIVETWEB_DIR)/src/civetweb.c $(CJSON_DIR)/cJSON.c
 BUILD_DIR := build
 BIN := $(BUILD_DIR)/remotica-backend
 

@@ -5,25 +5,40 @@ An from-scratch, OctoPrint-inspired remote control dashboard for 3D printers. Da
 ## Repo layout
 
 - `frontend/` — the active app. See `frontend/CLAUDE.md` for details.
-- `backend/` — started. C, using civetweb (embedded HTTP + WebSocket server) and cJSON, both vendored under `backend/third_party/`. See "Planned backend" below.
+- `backend/` — C, using civetweb (embedded HTTP + WebSocket server) and cJSON, both vendored under `backend/third_party/`. See "Backend" below.
 - `legacy-static/`, `images/` — old hand-built mockup, kept on disk for reference only. Gitignored on purpose — do not re-add to git without asking.
 
 ## Deployment model
 
 Frontend and backend run as a **single process** on the same PC that's physically wired to the printer (same model OctoPrint uses). The backend serves the already-built frontend directly — no separate hosting, no CORS setup. Other devices reach it over LAN by browsing to that PC's IP. No accounts, no cloud relay, no port-forwarding.
 
-## Planned backend
+## Backend
 
 - **Language:** C — deliberate choice, not a placeholder.
 - **HTTP + WebSocket:** [civetweb](https://github.com/civetweb/civetweb) (MIT), one embeddable library for both. **Not Mongoose** — Mongoose looked like the obvious pick early on, but it's dual-licensed GPLv2/commercial with no permissive option, which would force this MIT-licensed repo to either go GPL or pay for a commercial license. civetweb is a permissively-licensed sibling (same original codebase lineage) with the same HTTP+WebSocket feature set, so it was swapped in instead. If any other C dependency gets added later, check its license before vendoring it — same issue could recur.
 - **JSON:** [cJSON](https://github.com/DaveGamble/cJSON) (MIT).
 - Both vendored as source under `backend/third_party/` (civetweb 1.16, cJSON 1.7.19) — no package manager, just `.c`/`.h` files compiled straight into the binary. Their upstream LICENSE files are kept alongside them.
-- **API shape:** REST for one-off actions (upload gcode, start/pause/cancel print, jog, set temps, get/set printer profile). WebSocket for continuous push of live state (temps, position, progress, logs) to every connected browser. So far only a `POST /api/command` smoke-test route exists (`backend/src/main.c`) — it parses whatever JSON body it's sent, prints it to stdout, and echoes it back. It's not a real command yet, just proof the frontend can reach the backend.
-- **Build:** `cd backend && make` → `backend/build/remotica-backend`. Built with `NO_SSL` (no HTTPS needed on LAN) and `USE_WEBSOCKET` defined. Needs a C toolchain (`gcc`/`make`) — not installed on this machine yet, install via `sudo apt-get install build-essential`.
-- **Target OS:** Linux first, headless-compatible (Ubuntu Server, no GUI needed — none of the planned libraries touch a display). A Windows fork is planned for later; only the serial layer (POSIX `termios` → Win32 serial API) should need to change, since civetweb/cJSON are already cross-platform.
-- **Printer link:** USB serial, G-code in/out, parsed printer replies (temperature reports, `ok`, errors/resend). Not built yet.
-- **Frontend dev proxy:** `frontend/vite.config.js` proxies `/api` → `http://localhost:8080` during `npm run dev`, so the frontend can call relative `/api/...` URLs without CORS setup. In production the backend serves the built frontend itself (same origin), so the proxy isn't needed there.
-- Once real backend state exists, the frontend's mock hooks (`use-printer-temps.js`, local jog state in `ControlPanel.jsx`, printer profile in `printer-profile.js`) need to flip from generating fake state to syncing from the backend. `frontend/src/components/dashboard/BackendConnectionTest.jsx` is a **temporary** dev-only panel for testing the connection — remove it once real controls talk to the backend for real.
+- **Build:** `cd backend && make` → `backend/build/remotica-backend`. Run it from `backend/` (it uses relative paths for `data/profile.json` and `data/uploads/`, both gitignored — runtime-generated). Built with `NO_SSL` (no HTTPS needed on LAN) and `USE_WEBSOCKET` defined. Needs a C toolchain — install via `sudo apt-get install build-essential clang-format cppcheck`.
+- **Target OS:** Linux first, headless-compatible (Ubuntu Server, no GUI needed). A Windows fork is planned for later; only the serial layer (POSIX `termios` → Win32 serial API) should need to change, since civetweb/cJSON are already cross-platform.
+
+### Source layout (`backend/src/`)
+
+- `main.c` — wires everything together: parses `--serial <device>` (optional — omit it to use the simulator, which is the default), starts civetweb, registers routes, runs a background thread that ticks the driver/job manager and broadcasts state roughly every 300ms.
+- `printer_state.h/.c` — `PrinterState`: the single shared, mutex-protected struct holding "what's true about the printer right now" (temps, position, connection, job status/progress). Everything else reads/writes through this.
+- `printer_profile.h/.c` — bed size / max Z / min extrude temp, persisted to `data/profile.json`. Same field names as the frontend's `printer-profile.js` (still hardcoded there — not yet wired to fetch this from the backend).
+- `transport.h` — `PrinterDriver`: the function-pointer interface (connect/disconnect/jog/home/set_target_temp/tick) that decouples the REST API from *how* commands actually reach the printer.
+- `transport_sim.h/.c` — the default driver. No real hardware; fakes temperature drift and instant moves, mirroring `use-printer-temps.js`'s mock behavior in C.
+- `transport_serial.h/.c` — the real driver, talks POSIX `termios` + G-code to an actual printer over USB. **Written carefully but not tested against real hardware** (none was available while writing it) — see the warning at the top of `transport_serial.h` before using `--serial` with a real printer. This is exactly the kind of code to run past Opus or test very cautiously first (see the project's memory notes on when to do that).
+- `job_manager.h/.c` — gcode upload (to `data/uploads/`, with filename validation against path traversal) and the print job state machine (idle → ready → printing → ready). Progress while "printing" is a **fake timer** (~30s per print), not real line-by-line streaming to the printer yet — see the big comment on `job_manager_tick()` for what real streaming would need.
+- `api_handlers.h/.c` — every REST route: `GET /api/state`, `POST /api/jog`, `POST /api/home`, `POST /api/temp`, `GET`+`POST /api/profile`, `POST /api/upload?filename=...`, `POST /api/print/start`, `POST /api/print/cancel`. Also where jog/temp inputs get clamped to the profile's physical limits and the cold-extrusion safety check lives (mirrors `ControlPanel.jsx`'s `canExtrude` check, enforced server-side too since a backend shouldn't trust a frontend-only safety check for something with a physical consequence).
+- `ws_broadcaster.h/.c` — tracks connected WebSocket clients at `/api/ws` and pushes a state snapshot (same shape as `GET /api/state`) to all of them every tick.
+- `POST /api/command` (defined directly in `main.c`) — the original connectivity smoke-test route, kept for `BackendConnectionTest.jsx`. Delete both together once the frontend is wired to the real endpoints above.
+
+### Not done yet
+
+- **Frontend isn't wired to any of this** — `use-printer-temps.js`, `ControlPanel.jsx`'s local jog state, and `printer-profile.js` are all still frontend-only mock data. The backend now has everything they'd need to talk to instead (`GET /api/state`, `POST /api/jog`, etc., plus `/api/ws` for live updates) — wiring that up is the natural next step.
+- **Real print streaming** — `job_manager_tick()`'s progress is a fake timer, not derived from actually sending the queued gcode file to the printer line by line. See that function's doc comment for what's involved.
+- **The serial driver is unverified against real hardware** (see above).
 
 ## Formatting / static analysis
 
@@ -32,7 +47,7 @@ Frontend and backend run as a **single process** on the same PC that's physicall
 
 ## Git
 
-- Only `frontend/` (and this file) are tracked. `legacy-static/` and `images/` are gitignored on purpose.
+- `frontend/`, `backend/` (except `backend/build/` and `backend/data/`, both gitignored), and root docs/config are tracked. `legacy-static/` and `images/` are gitignored on purpose.
 - Git identity is already configured (`Yuval Peleg`, a GitHub noreply email) — **never run `git config` to change it**, that email was deliberately chosen.
 - Repo is public: https://github.com/Yuval-Peleg/remotica — README explicitly warns it's not ready for real printer use; MIT LICENSE backs that disclaimer.
 - **Committing and pushing to this repo is pre-authorized** (confirmed 2026-07-31) — no need to ask before each commit/push, use judgment on when a chunk of work is worth committing and split into logical commits rather than one giant one.

@@ -16,5 +16,6 @@ dist-ssr/
 /legacy-static/
 /images/
 
-# C backend build output
+# C backend build output and runtime-generated data (profile, uploads)
 /backend/build/
+/backend/data/
