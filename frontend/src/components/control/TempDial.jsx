@@ -104,7 +104,7 @@ export function TempDial({
               if (e.key === "Enter") commitDraft();
               if (e.key === "Escape") setEditing(false);
             }}
-            className="w-12 rounded border border-ring bg-background text-center text-xs tabular-nums text-foreground outline-none"
+            className="w-14 rounded-md border border-input bg-transparent px-1.5 py-1 text-center text-xs tabular-nums text-foreground outline-none transition-colors [appearance:textfield] focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
           />
         ) : (
           <button

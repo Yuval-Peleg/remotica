@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { Flame, Lock, Thermometer } from "lucide-react";
 import { BedSchematic } from "@/components/control/BedSchematic";
 import { AxisRail } from "@/components/control/AxisRail";
@@ -19,6 +20,16 @@ export function ControlPanel({
   const canExtrude = hotend.current >= profile.minExtrudeTempC;
   const isPrintActive = jobStatus === "printing" || jobStatus === "paused";
 
+  const [homing, setHoming] = useState(false);
+  const handleHome = async () => {
+    setHoming(true);
+    try {
+      await home();
+    } finally {
+      setHoming(false);
+    }
+  };
+
   const jogZ = (deltaMm) => jog("Z", deltaMm);
   const jogExtruder = (deltaMm) => {
     if (!canExtrude) return;
@@ -39,7 +50,8 @@ export function ControlPanel({
             bedWidthMm={profile.bedWidthMm}
             bedDepthMm={profile.bedDepthMm}
             onJog={jog}
-            onHome={home}
+            onHome={handleHome}
+            homing={homing}
           />
         </div>
 

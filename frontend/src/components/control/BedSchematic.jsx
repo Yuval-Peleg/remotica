@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Home } from "lucide-react";
+import { cn } from "@/lib/utils";
 
 // XY jog is always 1mm resolution — no user-facing step control for this axis.
 const SNAP_MM = 1;
@@ -29,12 +30,24 @@ function clamp(value, min, max) {
 // real position catches up), the marker/coordinates show a locally-tracked
 // preview position instead of `position`, so the drag feels instant and
 // doesn't visibly snap back to the old spot while waiting on the network.
+//
+// `homing`: true while a home command is in flight (see ControlPanel,
+// which owns this state around its onHome call). A real G28 blocks the
+// backend's serial driver for as long as the printer takes to physically
+// home — during that window neither position nor temperature actually
+// update (the driver has the port lock held the whole time, and there's
+// no way to poll position from real hardware at all — see transport_
+// serial.c), so showing the stale, unmoving marker/coordinates as if
+// they were live would be misleading. Grays the whole schematic out with
+// a "Homing..." indicator instead, and blocks further taps/drags until
+// it's done.
 export function BedSchematic({
   position,
   bedWidthMm,
   bedDepthMm,
   onJog,
   onHome,
+  homing = false,
 }) {
   const areaRef = useRef(null);
   const [dragging, setDragging] = useState(false);
@@ -95,7 +108,7 @@ export function BedSchematic({
 
     if (isDoubleTap) {
       lastTapRef.current = { time: 0, x: 0, y: 0 };
-      onHome?.();
+      if (!homing) onHome?.();
       return;
     }
 
@@ -147,62 +160,78 @@ export function BedSchematic({
   const gridDivisions = Math.max(2, Math.round(bedWidthMm / GRID_CELL_MM));
 
   return (
-    <div className="flex select-none flex-col gap-2">
-      <div className="flex h-8 items-center gap-2">
-        <div className="w-[1.1rem] shrink-0" />
-        <div className="flex flex-1 items-center text-muted-foreground">
-          <ArrowLeft className="size-3.5 shrink-0" />
-          <div className="mx-1 h-px flex-1 bg-muted-foreground/50" />
-          <span className="shrink-0 bg-card px-1 text-[10px]">
-            {bedWidthMm}mm
-          </span>
-          <div className="mx-1 h-px flex-1 bg-muted-foreground/50" />
-          <ArrowRight className="size-3.5 shrink-0" />
-        </div>
-      </div>
-
-      <div className="flex gap-2">
-        <div
-          className="flex w-[1.1rem] shrink-0 flex-col items-center text-muted-foreground"
-          style={{ height: schematicHeight || undefined }}
-        >
-          <ArrowUp className="size-3.5 shrink-0" />
-          <div className="my-1 w-px flex-1 bg-muted-foreground/50" />
-          <span className="shrink-0 bg-card px-0.5 text-[10px] [writing-mode:vertical-rl] rotate-180">
-            {bedDepthMm}mm
-          </span>
-          <div className="my-1 w-px flex-1 bg-muted-foreground/50" />
-          <ArrowDown className="size-3.5 shrink-0" />
+    <div className="relative">
+      <div
+        className={cn(
+          "flex select-none flex-col gap-2",
+          homing && "pointer-events-none opacity-30 blur-[1px]"
+        )}
+      >
+        <div className="flex h-8 items-center gap-2">
+          <div className="w-[1.1rem] shrink-0" />
+          <div className="flex flex-1 items-center text-muted-foreground">
+            <ArrowLeft className="size-3.5 shrink-0" />
+            <div className="mx-1 h-px flex-1 bg-muted-foreground/50" />
+            <span className="shrink-0 bg-card px-1 text-[10px]">
+              {bedWidthMm}mm
+            </span>
+            <div className="mx-1 h-px flex-1 bg-muted-foreground/50" />
+            <ArrowRight className="size-3.5 shrink-0" />
+          </div>
         </div>
 
-        <div
-          ref={areaRef}
-          onPointerDown={handlePointerDown}
-          onPointerMove={handlePointerMove}
-          onPointerUp={commit}
-          onPointerCancel={commit}
-          className="relative aspect-square w-full flex-1 touch-none cursor-crosshair rounded-lg border border-border bg-secondary/40 bg-[linear-gradient(to_right,var(--color-border)_1px,transparent_1px),linear-gradient(to_bottom,var(--color-border)_1px,transparent_1px)]"
-          style={{
-            backgroundSize: `${100 / gridDivisions}% ${100 / gridDivisions}%`,
-          }}
-        >
+        <div className="flex gap-2">
           <div
-            className="absolute size-3.5 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-primary bg-primary/40"
-            style={{ left: `${markerLeftPct}%`, top: `${markerTopPct}%` }}
-          />
+            className="flex w-[1.1rem] shrink-0 flex-col items-center text-muted-foreground"
+            style={{ height: schematicHeight || undefined }}
+          >
+            <ArrowUp className="size-3.5 shrink-0" />
+            <div className="my-1 w-px flex-1 bg-muted-foreground/50" />
+            <span className="shrink-0 bg-card px-0.5 text-[10px] [writing-mode:vertical-rl] rotate-180">
+              {bedDepthMm}mm
+            </span>
+            <div className="my-1 w-px flex-1 bg-muted-foreground/50" />
+            <ArrowDown className="size-3.5 shrink-0" />
+          </div>
+
+          <div
+            ref={areaRef}
+            onPointerDown={handlePointerDown}
+            onPointerMove={handlePointerMove}
+            onPointerUp={commit}
+            onPointerCancel={commit}
+            className="relative aspect-square w-full flex-1 touch-none cursor-crosshair rounded-lg border border-border bg-secondary/40 bg-[linear-gradient(to_right,var(--color-border)_1px,transparent_1px),linear-gradient(to_bottom,var(--color-border)_1px,transparent_1px)]"
+            style={{
+              backgroundSize: `${100 / gridDivisions}% ${100 / gridDivisions}%`,
+            }}
+          >
+            <div
+              className="absolute size-3.5 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-primary bg-primary/40"
+              style={{ left: `${markerLeftPct}%`, top: `${markerTopPct}%` }}
+            />
+          </div>
+        </div>
+
+        <div className="flex flex-col items-center text-center text-xs text-muted-foreground">
+          <p className="flex items-center justify-center gap-1.5">
+            {isHomed && <Home className="size-3 shrink-0 text-primary" />}
+            <span>
+              X {displayPosition.x.toFixed(1)}mm &middot; Y{" "}
+              {displayPosition.y.toFixed(1)}mm
+            </span>
+          </p>
+          <p>tap or drag to jog &middot; double-tap to home</p>
         </div>
       </div>
 
-      <div className="flex flex-col items-center text-center text-xs text-muted-foreground">
-        <p className="flex items-center justify-center gap-1.5">
-          {isHomed && <Home className="size-3 shrink-0 text-primary" />}
-          <span>
-            X {displayPosition.x.toFixed(1)}mm &middot; Y{" "}
-            {displayPosition.y.toFixed(1)}mm
-          </span>
-        </p>
-        <p>tap or drag to jog &middot; double-tap to home</p>
-      </div>
+      {homing && (
+        <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 rounded-lg bg-background/70 text-center backdrop-blur-sm">
+          <Home className="size-8 animate-pulse text-primary" />
+          <p className="text-sm font-medium text-muted-foreground">
+            Homing&hellip;
+          </p>
+        </div>
+      )}
     </div>
   );
 }

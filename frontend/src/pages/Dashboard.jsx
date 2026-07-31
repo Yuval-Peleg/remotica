@@ -48,6 +48,7 @@ export function Dashboard() {
   const {
     connected,
     connectionType,
+    firmwareInfo,
     hotend,
     bed,
     position,
@@ -94,6 +95,7 @@ export function Dashboard() {
             <ConnectionStatus
               connected={connected}
               connectionType={connectionType}
+              firmwareInfo={firmwareInfo}
             />
 
             <GcodeDropzone
