@@ -147,7 +147,7 @@ export function BedSchematic({
   const gridDivisions = Math.max(2, Math.round(bedWidthMm / GRID_CELL_MM));
 
   return (
-    <div className="flex flex-col gap-2">
+    <div className="flex select-none flex-col gap-2">
       <div className="flex h-8 items-center gap-2">
         <div className="w-[1.1rem] shrink-0" />
         <div className="flex flex-1 items-center text-muted-foreground">

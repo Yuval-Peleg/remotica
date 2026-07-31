@@ -33,7 +33,7 @@ export function ControlPanel({
           isPrintActive && "pointer-events-none opacity-30 blur-[1px]"
         )}
       >
-        <div className="w-full max-w-xs">
+        <div className="mx-auto w-full max-w-xs lg:mx-0">
           <BedSchematic
             position={position}
             bedWidthMm={profile.bedWidthMm}
