@@ -6,11 +6,12 @@ An from-scratch, OctoPrint-inspired remote control dashboard for 3D printers. Da
 
 - `frontend/` — the active app. See `frontend/CLAUDE.md` for details.
 - `backend/` — C, using civetweb (embedded HTTP + WebSocket server) and cJSON, both vendored under `backend/third_party/`. See "Backend" below.
+- `run.sh` — one-command launcher for a test session: builds the backend if needed, starts it (`--serial auto` by default — real printer, auto-detected; `./run.sh --sim` for the simulator instead), starts the frontend dev server, waits for both to actually be reachable, prints the printer connection status, and opens the dashboard in a browser. Ctrl+C stops both processes together (cleanly — killing background PIDs from a script needs care: `npm run dev` forks a real `vite` child rather than exec'ing into it, so the launcher execs straight into `node_modules/.bin/vite` instead, otherwise the actual process would survive as an orphan after `npm` was killed). This is still two separate processes under the hood (see "Deployment model" below) — it's a dev-mode convenience wrapper, not the eventual single-process production model.
 - `legacy-static/`, `images/` — old hand-built mockup, kept on disk for reference only. Gitignored on purpose — do not re-add to git without asking.
 
 ## Deployment model
 
-Frontend and backend run as a **single process** on the same PC that's physically wired to the printer (same model OctoPrint uses). The backend serves the already-built frontend directly — no separate hosting, no CORS setup. Other devices reach it over LAN by browsing to that PC's IP. No accounts, no cloud relay, no port-forwarding.
+Frontend and backend run as a **single process** on the same PC that's physically wired to the printer (same model OctoPrint uses). The backend serves the already-built frontend directly — no separate hosting, no CORS setup. Other devices reach it over LAN by browsing to that PC's IP. No accounts, no cloud relay, no port-forwarding. **Not built yet** — right now `run.sh` (or manually running each half) starts frontend and backend as two separate processes, backend serving the API and the Vite dev server serving the frontend with a proxy in between. See "Not done yet" below.
 
 ## Backend
 
