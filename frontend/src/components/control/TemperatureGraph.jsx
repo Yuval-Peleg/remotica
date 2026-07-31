@@ -38,10 +38,13 @@ export function TemperatureGraph({ history, hotendTarget, bedTarget }) {
     )
   );
 
-  const xAt = (i) => PAD.left + (n <= 1 ? INNER_WIDTH : (i / (n - 1)) * INNER_WIDTH);
+  const xAt = (i) =>
+    PAD.left + (n <= 1 ? INNER_WIDTH : (i / (n - 1)) * INNER_WIDTH);
   const yAt = (v) => PAD.top + INNER_HEIGHT - (v / yMax) * INNER_HEIGHT;
 
-  const hotendPoints = history.map((p, i) => `${xAt(i)},${yAt(p.hotend)}`).join(" ");
+  const hotendPoints = history
+    .map((p, i) => `${xAt(i)},${yAt(p.hotend)}`)
+    .join(" ");
   const bedPoints = history.map((p, i) => `${xAt(i)},${yAt(p.bed)}`).join(" ");
   const gridValues = [0, yMax / 2, yMax];
 
@@ -168,8 +171,18 @@ export function TemperatureGraph({ history, hotendTarget, bedTarget }) {
 
           {n > 0 && (
             <>
-              <circle cx={xAt(n - 1)} cy={yAt(lastBed)} r={5} className="fill-card" />
-              <circle cx={xAt(n - 1)} cy={yAt(lastBed)} r={3.5} fill={TEMP_COLORS.bed} />
+              <circle
+                cx={xAt(n - 1)}
+                cy={yAt(lastBed)}
+                r={5}
+                className="fill-card"
+              />
+              <circle
+                cx={xAt(n - 1)}
+                cy={yAt(lastBed)}
+                r={3.5}
+                fill={TEMP_COLORS.bed}
+              />
               <text
                 x={xAt(n - 1) - 8}
                 y={yAt(lastBed) - 8}
@@ -179,8 +192,18 @@ export function TemperatureGraph({ history, hotendTarget, bedTarget }) {
                 {Math.round(lastBed)}&deg;
               </text>
 
-              <circle cx={xAt(n - 1)} cy={yAt(lastHotend)} r={5} className="fill-card" />
-              <circle cx={xAt(n - 1)} cy={yAt(lastHotend)} r={3.5} fill={TEMP_COLORS.hotend} />
+              <circle
+                cx={xAt(n - 1)}
+                cy={yAt(lastHotend)}
+                r={5}
+                className="fill-card"
+              />
+              <circle
+                cx={xAt(n - 1)}
+                cy={yAt(lastHotend)}
+                r={3.5}
+                fill={TEMP_COLORS.hotend}
+              />
               <text
                 x={xAt(n - 1) - 8}
                 y={yAt(lastHotend) - 8}

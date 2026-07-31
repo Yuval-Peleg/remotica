@@ -43,9 +43,7 @@ export function AxisRail({
 
   return (
     <div className="flex w-20 shrink-0 flex-col items-center gap-1.5">
-      <span className="text-xs font-medium text-muted-foreground">
-        {label}
-      </span>
+      <span className="text-xs font-medium text-muted-foreground">{label}</span>
       <div
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}

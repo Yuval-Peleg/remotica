@@ -18,7 +18,9 @@ export function ControlPanel({ hotend, bed, setHotendTarget, setBedTarget }) {
   const canExtrude = hotend.current >= PRINTER_PROFILE.minExtrudeTempC;
 
   const jogZ = (deltaMm) => {
-    setZHeight((z) => Math.min(Math.max(z + deltaMm, 0), PRINTER_PROFILE.maxZMm));
+    setZHeight((z) =>
+      Math.min(Math.max(z + deltaMm, 0), PRINTER_PROFILE.maxZMm)
+    );
   };
 
   const jogExtruder = (deltaMm) => {
