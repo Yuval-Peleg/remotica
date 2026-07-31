@@ -28,13 +28,19 @@
 #include "printer_state.h"
 #include "transport.h"
 
+struct ConsoleLog;
+
 /* Creates a new serial driver bound to the given shared state, for a
  * printer expected to be at `device_path` (e.g. "/dev/ttyUSB0" on Linux).
+ * Every line sent to and received from the printer is recorded to
+ * `console` (see console_log.h) as it happens — pass NULL if you don't
+ * want that (e.g. in a test that doesn't care about logging).
  * This does NOT open the connection yet — that happens when
  * driver->connect() is called, same as the simulator, so both drivers
  * behave the same way from main.c's point of view. Returns NULL if
  * device_path is too long to store. */
-PrinterDriver *transport_serial_create(PrinterState *state, const char *device_path);
+PrinterDriver *transport_serial_create(PrinterState *state, struct ConsoleLog *console,
+                                       const char *device_path);
 
 /* Disconnects (if still connected) and frees a driver created by
  * transport_serial_create(). */

@@ -37,8 +37,21 @@
 
 #include "printer_state.h"
 
+struct ConsoleLog;
+
 /* Which heater a temperature command is targeting. */
 typedef enum { PRINTER_HEATER_HOTEND, PRINTER_HEATER_BED } PrinterHeater;
+
+/* Feed rates (mm/minute — what G-code's F parameter expects) used for
+ * manual jog moves. Z and E move much slower than X/Y on a typical
+ * printer, so they get lower feed rates. Shared between transport_sim.c
+ * and transport_serial.c so the simulator's synthesized gcode (for the
+ * console log — see console_log.h) actually matches what the real driver
+ * would send for the same jog. These are conservative, generally-safe
+ * defaults, not tuned for any specific printer. */
+#define JOG_FEED_RATE_XY 3000.0
+#define JOG_FEED_RATE_Z 600.0
+#define JOG_FEED_RATE_E 300.0
 
 typedef struct PrinterDriver {
     /* Opens the connection to the printer (or, for the simulator, just
@@ -79,6 +92,11 @@ typedef struct PrinterDriver {
      * when the driver is created (see transport_sim_create /
      * transport_serial_create) and never changed after that. */
     PrinterState *state;
+
+    /* Where this driver records every gcode line it sends/receives, for
+     * the frontend's terminal view (see console_log.h). Set once at
+     * creation, same as `state`. */
+    struct ConsoleLog *console;
 } PrinterDriver;
 
 #endif /* REMOTICA_TRANSPORT_H */

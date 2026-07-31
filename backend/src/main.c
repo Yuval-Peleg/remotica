@@ -34,6 +34,7 @@
 
 #include "api_handlers.h"
 #include "civetweb.h"
+#include "console_log.h"
 #include "job_manager.h"
 #include "printer_profile.h"
 #include "printer_state.h"
@@ -123,11 +124,14 @@ int main(int argc, char **argv) {
     PrinterProfile profile;
     printer_profile_load(&profile, PROFILE_PATH);
 
+    ConsoleLog console;
+    console_log_init(&console);
+
     /* --- 3. Printer driver --- */
 
     PrinterDriver *driver;
     if (serial_device != NULL) {
-        driver = transport_serial_create(&state, serial_device);
+        driver = transport_serial_create(&state, &console, serial_device);
         if (driver == NULL) {
             fprintf(stderr, "Failed to create serial driver for %s\n", serial_device);
             return 1;
@@ -136,7 +140,7 @@ int main(int argc, char **argv) {
                "transport_serial.h for details before trusting this with a real printer).\n",
                serial_device);
     } else {
-        driver = transport_sim_create(&state);
+        driver = transport_sim_create(&state, &console);
         if (driver == NULL) {
             fprintf(stderr, "Failed to create simulated driver\n");
             return 1;
@@ -179,6 +183,8 @@ int main(int argc, char **argv) {
     ws_broadcaster_init(&broadcaster);
     ws_broadcaster_register(ctx, &broadcaster);
 
+    console_log_register_routes(ctx, &console);
+
     /* --- 5. Background tick thread --- */
 
     TickThreadArgs tick_args = {.driver = driver, .state = &state, .broadcaster = &broadcaster};
@@ -186,7 +192,8 @@ int main(int argc, char **argv) {
     pthread_create(&tick_thread, NULL, tick_thread_main, &tick_args);
 
     printf("Remotica backend listening on http://0.0.0.0:%s\n", LISTEN_PORT);
-    printf("REST API under /api/*, live state over WebSocket at /api/ws\n\n");
+    printf("REST API under /api/*, live state over WebSocket at /api/ws\n");
+    printf("Gcode console: GET /api/console, live at /api/ws/console\n\n");
     fflush(stdout);
 
     while (!s_stop_requested) {

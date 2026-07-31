@@ -7,7 +7,10 @@
 
 #include "transport_sim.h"
 
+#include <stdio.h>
 #include <stdlib.h>
+
+#include "console_log.h"
 
 /* How many degrees the simulated temperature moves toward its target on
  * each tick. main.c calls tick() roughly every 300ms, so a hotend step of
@@ -60,14 +63,49 @@ static void sim_disconnect(PrinterDriver *self) {
     printer_state_unlock(self->state);
 }
 
+/* Records a synthesized command as "sent", then immediately a synthesized
+ * "ok" as "received" — the simulator answers instantly, so there's no
+ * real round-trip to represent, but logging both sides keeps the
+ * console's shape consistent with what the real serial driver logs (see
+ * send_and_wait_for_ok in transport_serial.c). Does nothing if this
+ * driver wasn't given a console to log to (see transport_sim_create). */
+static void log_command(PrinterDriver *self, const char *line) {
+    if (self->console == NULL) {
+        return;
+    }
+    console_log_append(self->console, CONSOLE_DIRECTION_SENT, line);
+    console_log_append(self->console, CONSOLE_DIRECTION_RECEIVED, "ok");
+}
+
 static int sim_jog(PrinterDriver *self, char axis, double delta_mm) {
-    printer_state_lock(self->state);
+    if (axis != 'X' && axis != 'Y' && axis != 'Z' && axis != 'E') {
+        return -1; /* unknown axis */
+    }
+
+    /* Synthesize the same three-line relative-move sequence
+     * transport_serial.c's serial_jog() actually sends to a real printer
+     * — see JOG_FEED_RATE_* in transport.h for where the feed rates come
+     * from (shared with the real driver so this matches exactly). */
+    double feed_rate = JOG_FEED_RATE_XY;
+    if (axis == 'Z') {
+        feed_rate = JOG_FEED_RATE_Z;
+    } else if (axis == 'E') {
+        feed_rate = JOG_FEED_RATE_E;
+    }
+
+    char move_command[128];
+    snprintf(move_command, sizeof(move_command), "G1 %c%.3f F%.0f", axis, delta_mm, feed_rate);
+
+    log_command(self, "G91");
+    log_command(self, move_command);
+    log_command(self, "G90");
 
     /* Deliberately no bounds-checking here (e.g. against bed size or max
      * Z) — that's the API layer's job (see api_handlers.c), which has
      * access to the printer profile and can clamp before ever calling
      * this. This driver's only responsibility is "move by this much",
      * same as how a real printer just obeys the G-code it's sent. */
+    printer_state_lock(self->state);
     switch (axis) {
     case 'X':
         self->state->position.x_mm += delta_mm;
@@ -81,16 +119,15 @@ static int sim_jog(PrinterDriver *self, char axis, double delta_mm) {
     case 'E':
         self->state->position.e_mm += delta_mm;
         break;
-    default:
-        printer_state_unlock(self->state);
-        return -1; /* unknown axis */
     }
-
     printer_state_unlock(self->state);
+
     return 0;
 }
 
 static int sim_home(PrinterDriver *self) {
+    log_command(self, "G28");
+
     printer_state_lock(self->state);
     self->state->position.x_mm = 0.0;
     self->state->position.y_mm = 0.0;
@@ -102,6 +139,14 @@ static int sim_home(PrinterDriver *self) {
 }
 
 static int sim_set_target_temp(PrinterDriver *self, PrinterHeater heater, double celsius) {
+    char command[32];
+    if (heater == PRINTER_HEATER_HOTEND) {
+        snprintf(command, sizeof(command), "M104 S%.1f", celsius);
+    } else {
+        snprintf(command, sizeof(command), "M140 S%.1f", celsius);
+    }
+    log_command(self, command);
+
     printer_state_lock(self->state);
     if (heater == PRINTER_HEATER_HOTEND) {
         self->state->hotend.target_c = celsius;
@@ -137,7 +182,7 @@ static void sim_tick(PrinterDriver *self) {
     printer_state_unlock(self->state);
 }
 
-PrinterDriver *transport_sim_create(PrinterState *state) {
+PrinterDriver *transport_sim_create(PrinterState *state, ConsoleLog *console) {
     PrinterDriver *driver = malloc(sizeof(PrinterDriver));
     if (driver == NULL) {
         return NULL; /* out of memory — extremely unlikely for one small
@@ -152,6 +197,7 @@ PrinterDriver *transport_sim_create(PrinterState *state) {
     driver->tick = sim_tick;
     driver->impl_data = NULL; /* the simulator has no private data to track */
     driver->state = state;
+    driver->console = console;
 
     return driver;
 }

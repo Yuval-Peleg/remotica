@@ -37,6 +37,8 @@
 #include <termios.h>
 #include <unistd.h>
 
+#include "console_log.h"
+
 /* Most Marlin-based printers default to 115200 baud. Some (especially
  * newer 32-bit boards) use 250000 instead — if this doesn't work with a
  * particular printer, that's the first thing to check and change. */
@@ -77,8 +79,13 @@ typedef struct {
 /* Writes `line` followed by a newline to the serial port. write() is
  * allowed to write fewer bytes than asked in a single call (this is
  * normal, not an error), so this loops until everything has actually
- * gone out. Returns 0 on success, -1 on failure. */
-static int write_line(int fd, const char *line) {
+ * gone out. Returns 0 on success, -1 on failure.
+ *
+ * If `console` is non-NULL, the line is also recorded there as a "sent"
+ * entry — this is the actual, real gcode this driver sends, not a
+ * simulation of it, so the frontend's terminal view shows exactly what
+ * went out over the wire. */
+static int write_line(int fd, const char *line, ConsoleLog *console) {
     char buffer[256];
     int written = snprintf(buffer, sizeof(buffer), "%s\n", line);
     if (written < 0 || (size_t)written >= sizeof(buffer)) {
@@ -96,6 +103,11 @@ static int write_line(int fd, const char *line) {
         }
         total_sent += (size_t)sent;
     }
+
+    if (console != NULL) {
+        console_log_append(console, CONSOLE_DIRECTION_SENT, line);
+    }
+
     return 0;
 }
 
@@ -108,8 +120,11 @@ static int write_line(int fd, const char *line) {
  * This reads one byte at a time, which is not the most efficient way to
  * do serial I/O, but printer replies are short (a few dozen bytes) and
  * infrequent, so simplicity and correctness matter a lot more here than
- * squeezing out extra performance. */
-static int read_line(int fd, char *buf, size_t buf_size, int timeout_ms) {
+ * squeezing out extra performance.
+ *
+ * If `console` is non-NULL and a complete line is actually read (not on
+ * timeout/error), it's recorded there as a "received" entry. */
+static int read_line(int fd, char *buf, size_t buf_size, int timeout_ms, ConsoleLog *console) {
     size_t length = 0;
     struct pollfd pfd = {.fd = fd, .events = POLLIN};
 
@@ -140,6 +155,9 @@ static int read_line(int fd, char *buf, size_t buf_size, int timeout_ms) {
 
         if (byte == '\n') {
             buf[length] = '\0';
+            if (console != NULL) {
+                console_log_append(console, CONSOLE_DIRECTION_RECEIVED, buf);
+            }
             return (int)length;
         }
         if (byte != '\r') { /* skip carriage returns, keep everything else */
@@ -157,13 +175,13 @@ static int read_line(int fd, char *buf, size_t buf_size, int timeout_ms) {
  * function is only used for commands where we don't need to look at the
  * reply's contents, just confirm it succeeded. Returns 0 on success, -1
  * on failure or timeout. */
-static int send_and_wait_for_ok(int fd, const char *line, int timeout_ms) {
-    if (write_line(fd, line) != 0) {
+static int send_and_wait_for_ok(int fd, const char *line, int timeout_ms, ConsoleLog *console) {
+    if (write_line(fd, line, console) != 0) {
         return -1;
     }
 
     char reply[256];
-    while (read_line(fd, reply, sizeof(reply), timeout_ms) >= 0) {
+    while (read_line(fd, reply, sizeof(reply), timeout_ms, console) >= 0) {
         if (strncmp(reply, "ok", 2) == 0) {
             return 0;
         }
@@ -262,14 +280,6 @@ static void serial_disconnect(PrinterDriver *self) {
     printer_state_unlock(self->state);
 }
 
-/* Feed rates (in mm/minute, which is what G-code's F parameter expects)
- * used for manual jog moves. Z and E move much slower than X/Y on a
- * typical printer, so they get lower feed rates. These are conservative,
- * generally-safe defaults, not tuned for any specific printer. */
-#define JOG_FEED_RATE_XY 3000.0
-#define JOG_FEED_RATE_Z 600.0
-#define JOG_FEED_RATE_E 300.0
-
 static int serial_jog(PrinterDriver *self, char axis, double delta_mm) {
     SerialImplData *impl = (SerialImplData *)self->impl_data;
 
@@ -287,13 +297,13 @@ static int serial_jog(PrinterDriver *self, char axis, double delta_mm) {
      * position") — exactly what a jog command means. G90 switches back to
      * absolute positioning afterward, which is what the rest of this
      * driver (and most gcode files) assume as the normal mode. */
-    if (send_and_wait_for_ok(impl->fd, "G91", TIMEOUT_MS_NORMAL) != 0) {
+    if (send_and_wait_for_ok(impl->fd, "G91", TIMEOUT_MS_NORMAL, self->console) != 0) {
         return -1;
     }
-    if (send_and_wait_for_ok(impl->fd, move_command, TIMEOUT_MS_NORMAL) != 0) {
+    if (send_and_wait_for_ok(impl->fd, move_command, TIMEOUT_MS_NORMAL, self->console) != 0) {
         return -1;
     }
-    if (send_and_wait_for_ok(impl->fd, "G90", TIMEOUT_MS_NORMAL) != 0) {
+    if (send_and_wait_for_ok(impl->fd, "G90", TIMEOUT_MS_NORMAL, self->console) != 0) {
         return -1;
     }
 
@@ -330,7 +340,7 @@ static int serial_home(PrinterDriver *self) {
     SerialImplData *impl = (SerialImplData *)self->impl_data;
 
     /* G28 with no axis letters homes all of X, Y, and Z. */
-    if (send_and_wait_for_ok(impl->fd, "G28", TIMEOUT_MS_HOMING) != 0) {
+    if (send_and_wait_for_ok(impl->fd, "G28", TIMEOUT_MS_HOMING, self->console) != 0) {
         return -1;
     }
 
@@ -358,7 +368,7 @@ static int serial_set_target_temp(PrinterDriver *self, PrinterHeater heater, dou
         snprintf(command, sizeof(command), "M140 S%.1f", celsius);
     }
 
-    if (send_and_wait_for_ok(impl->fd, command, TIMEOUT_MS_NORMAL) != 0) {
+    if (send_and_wait_for_ok(impl->fd, command, TIMEOUT_MS_NORMAL, self->console) != 0) {
         return -1;
     }
 
@@ -395,12 +405,12 @@ static void serial_tick(PrinterDriver *self) {
      * so this sends M105, then reads reply lines until it either finds
      * one containing "T:" (which is where the useful data lives) or
      * times out. */
-    if (write_line(impl->fd, "M105") != 0) {
+    if (write_line(impl->fd, "M105", self->console) != 0) {
         return;
     }
 
     char reply[256];
-    while (read_line(impl->fd, reply, sizeof(reply), TIMEOUT_MS_NORMAL) >= 0) {
+    while (read_line(impl->fd, reply, sizeof(reply), TIMEOUT_MS_NORMAL, self->console) >= 0) {
         /* Find "T:" and "B:" anywhere in the line, then parse the two
          * numbers that follow each one. Searching with strstr() first
          * (rather than trying to do it all in one sscanf format string)
@@ -431,7 +441,8 @@ static void serial_tick(PrinterDriver *self) {
     }
 }
 
-PrinterDriver *transport_serial_create(PrinterState *state, const char *device_path) {
+PrinterDriver *transport_serial_create(PrinterState *state, ConsoleLog *console,
+                                       const char *device_path) {
     if (strlen(device_path) >= sizeof(((SerialImplData *)0)->device_path)) {
         return NULL; /* device path too long for our fixed-size buffer */
     }
@@ -459,6 +470,7 @@ PrinterDriver *transport_serial_create(PrinterState *state, const char *device_p
     driver->tick = serial_tick;
     driver->impl_data = impl;
     driver->state = state;
+    driver->console = console;
 
     return driver;
 }
