@@ -1,0 +1,40 @@
+# 99-remotica-serial.rules
+# ==========================
+# Grants read/write access to USB-serial devices (3D printer mainboards
+# show up this way — either as ttyUSB* via a separate USB-to-serial chip
+# like a CH340/CP2102/FTDI, or as ttyACM* via native USB-CDC-ACM) without
+# requiring the current user to be a member of the "dialout" group and
+# without needing to log out and back in for that to take effect.
+#
+# Why this exists: by default on most Linux distros, USB-serial devices
+# are owned root:dialout with mode 0660 — readable/writable only by root
+# or a member of "dialout". That's a sensible default for a general-
+# purpose multi-user machine, but Remotica's whole deployment model is a
+# single PC dedicated to being wired to one printer (see root CLAUDE.md's
+# "Deployment model") — on that kind of machine, requiring every user to
+# discover, run, and then log out/in for `sudo usermod -a -G dialout
+# $USER` is unnecessary friction for what should be a "plug it in and it
+# works" experience.
+#
+# MODE="0666" (world read/write) rather than the more targeted
+# TAG+="uaccess" (which scopes access to whichever user is at the current
+# desktop session) is a deliberate choice: uaccess depends on
+# systemd-logind correctly recognizing an active local session, which
+# doesn't hold in every setup (some display managers, remote/SSH
+# sessions, etc.), and this rule's whole point is to be a boring, reliable
+# "just works" fallback rather than something that can still mysteriously
+# fail depending on how you're logged in. On a shared, multi-purpose
+# machine (not this project's target use case) MODE=0666 does mean any
+# local user or process could open the port — worth knowing if you're
+# installing this on something other than a dedicated printer PC.
+#
+# Installed automatically (with your permission) by run.sh — see
+# maybe_install_udev_rule() there. To install by hand instead:
+#   sudo cp udev/99-remotica-serial.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules
+#   sudo udevadm trigger
+# (unplug and replug the printer if the last two commands don't seem to
+# take effect on an already-connected device).
+
+SUBSYSTEM=="tty", KERNEL=="ttyUSB[0-9]*", MODE="0666"
+SUBSYSTEM=="tty", KERNEL=="ttyACM[0-9]*", MODE="0666"

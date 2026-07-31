@@ -28,6 +28,8 @@ BACKEND_LOG="$BACKEND_DIR/backend.log"
 FRONTEND_LOG="$FRONTEND_DIR/vite.log"
 BACKEND_URL="http://localhost:8080"
 FRONTEND_URL="http://localhost:5173"
+UDEV_RULE_SRC="$SCRIPT_DIR/udev/99-remotica-serial.rules"
+UDEV_RULE_DEST="/etc/udev/rules.d/99-remotica-serial.rules"
 
 # --sim swaps out --serial auto for no flag at all, which main.c already
 # treats as "use the simulator" — see backend/src/main.c.
@@ -35,6 +37,51 @@ SERIAL_ARGS=(--serial auto)
 if [[ "${1:-}" == "--sim" ]]; then
     SERIAL_ARGS=()
 fi
+
+# Real USB-serial hardware, on a fresh install, is normally only
+# accessible to root or a member of the "dialout" group — see
+# udev/99-remotica-serial.rules for the full explanation. Skipped
+# entirely in --sim mode (no hardware involved) and skipped if the rule
+# is already installed and up to date (cmp, not just an existence check,
+# so a later change to the shipped rule gets offered as an update too).
+# Only prompts if stdin is actually a terminal — a script running
+# unattended has no one to answer `read`, and `sudo` would otherwise just
+# hang waiting for a password nobody can type.
+maybe_install_udev_rule() {
+    [[ "${#SERIAL_ARGS[@]}" -eq 0 ]] && return
+    [[ -f "$UDEV_RULE_DEST" ]] && cmp -s "$UDEV_RULE_SRC" "$UDEV_RULE_DEST" && return
+    [[ -t 0 ]] || return
+
+    echo
+    echo "=== One-time setup: USB-serial permissions ==="
+    echo "Without this, connecting to a real printer will fail with"
+    echo "\"Permission denied\" unless your user is already in the"
+    echo "\"dialout\" group. Installing a udev rule (see"
+    echo "udev/99-remotica-serial.rules — worth reading before you say"
+    echo "yes, since this needs sudo) fixes that permanently, for any"
+    echo "USB-serial device, with no group membership or logout/login"
+    echo "required."
+    echo
+    read -r -p "Install it now? [Y/n] " reply
+    reply="${reply:-Y}"
+    if [[ "$reply" =~ ^[Yy] ]]; then
+        if sudo cp "$UDEV_RULE_SRC" "$UDEV_RULE_DEST" \
+            && sudo udevadm control --reload-rules \
+            && sudo udevadm trigger; then
+            echo "Installed. If your printer was already plugged in, unplug and replug it"
+            echo "if it doesn't connect right away."
+        else
+            echo "Could not install the udev rule — continuing anyway, but you may hit a"
+            echo "permission error connecting to a real printer."
+        fi
+    else
+        echo "Skipped — you may hit a permission error if your user isn't already in the"
+        echo "\"dialout\" group."
+    fi
+    echo
+}
+
+maybe_install_udev_rule
 
 BACKEND_PID=""
 FRONTEND_PID=""
