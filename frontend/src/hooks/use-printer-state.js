@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "@/lib/api";
 
-const HISTORY_LENGTH = 90; // matches the backend's ~300ms tick rate: ~27s of history
+const HISTORY_LENGTH = 200; // backend ticks ~every 300ms, so this is ~60s of history
 const RECONNECT_DELAY_MS = 2000;
 
 const INITIAL_STATE = {
