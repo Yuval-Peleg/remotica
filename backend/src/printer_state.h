@@ -38,9 +38,10 @@
  * "Idle / Ready to print / Printing" states (see frontend/src/pages/
  * Dashboard.jsx) so the backend and frontend agree on what these mean. */
 typedef enum {
-    JOB_STATUS_IDLE,    /* no file selected */
-    JOB_STATUS_READY,   /* a file is selected, but printing hasn't started */
-    JOB_STATUS_PRINTING /* actively printing (simulated progress for now) */
+    JOB_STATUS_IDLE,     /* no file selected */
+    JOB_STATUS_READY,    /* a file is selected, but printing hasn't started */
+    JOB_STATUS_PRINTING, /* actively printing (simulated progress for now) */
+    JOB_STATUS_PAUSED    /* printing was started, then paused mid-job */
 } JobStatus;
 
 /* A single temperature reading: what it is right now, and what it's

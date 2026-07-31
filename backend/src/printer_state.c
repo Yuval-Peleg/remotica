@@ -46,6 +46,8 @@ static const char *job_status_to_string(JobStatus status) {
         return "ready";
     case JOB_STATUS_PRINTING:
         return "printing";
+    case JOB_STATUS_PAUSED:
+        return "paused";
     default:
         /* Should never happen, but every switch on an enum should
          * have a fallback so we don't return garbage if someone adds

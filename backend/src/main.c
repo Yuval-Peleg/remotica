@@ -29,12 +29,10 @@
 #include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
 #include "api_handlers.h"
-#include "cJSON.h"
 #include "civetweb.h"
 #include "job_manager.h"
 #include "printer_profile.h"
@@ -45,7 +43,6 @@
 #include "ws_broadcaster.h"
 
 #define LISTEN_PORT "8080"
-#define MAX_BODY_BYTES 65536
 
 /* Where the printer profile is persisted, and where uploaded gcode files
  * are stored. Both are relative paths, so run this program with
@@ -68,57 +65,6 @@ static volatile sig_atomic_t s_stop_requested = 0;
 static void handle_stop_signal(int sig_num) {
     (void)sig_num;
     s_stop_requested = 1;
-}
-
-/* ---------------------------------------------------------------------
- * POST /api/command — the original connectivity smoke-test route.
- * Kept around alongside the real endpoints below: the frontend's
- * BackendConnectionTest dev panel (frontend/src/components/dashboard/
- * BackendConnectionTest.jsx) still uses it, and it doesn't cost anything
- * to leave running. Once the frontend is wired up to the real API
- * endpoints instead of mock data, this (and that dev panel) can be
- * deleted together.
- * --------------------------------------------------------------------- */
-
-static int command_handler(struct mg_connection *conn, void *cbdata) {
-    (void)cbdata;
-
-    const struct mg_request_info *req_info = mg_get_request_info(conn);
-    if (strcmp(req_info->request_method, "POST") != 0) {
-        mg_send_http_error(conn, 405, "Only POST is supported here");
-        return 1;
-    }
-
-    char body[MAX_BODY_BYTES];
-    int body_len = mg_read(conn, body, sizeof(body) - 1);
-    if (body_len < 0) {
-        body_len = 0;
-    }
-    body[body_len] = '\0';
-
-    cJSON *json = cJSON_Parse(body);
-    if (json == NULL) {
-        mg_send_http_error(conn, 400, "Body must be valid JSON");
-        return 1;
-    }
-
-    char *pretty = cJSON_Print(json);
-    printf("Instruction from frontend:\n%s\n\n", pretty);
-    fflush(stdout);
-
-    cJSON *response = cJSON_CreateObject();
-    cJSON_AddBoolToObject(response, "ok", 1);
-    cJSON_AddItemToObject(response, "received", json);
-    char *response_text = cJSON_PrintUnformatted(response);
-
-    mg_send_http_ok(conn, "application/json", (long long)strlen(response_text));
-    mg_write(conn, response_text, strlen(response_text));
-
-    free(pretty);
-    free(response_text);
-    cJSON_Delete(response); /* also frees the "json" object attached above */
-
-    return 1;
 }
 
 /* ---------------------------------------------------------------------
@@ -219,8 +165,6 @@ int main(int argc, char **argv) {
         driver->disconnect(driver);
         return 1;
     }
-
-    mg_set_request_handler(ctx, "/api/command", command_handler, NULL);
 
     AppContext app_context = {
         .state = &state,

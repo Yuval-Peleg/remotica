@@ -100,6 +100,27 @@ static double clamp(double value, double min, double max) {
     return value;
 }
 
+/* Reads the "filename" query string parameter (e.g. from
+ * "?filename=benchy.gcode") into `out`. Returns 1 on success, or 0 and
+ * sends a 400 error itself if it's missing — so callers can just
+ * `if (!get_filename_query_param(...)) return 1;`. Used by every handler
+ * that identifies a file by name in the URL rather than the body. */
+static int get_filename_query_param(struct mg_connection *conn, char *out, size_t out_size) {
+    const struct mg_request_info *req_info = mg_get_request_info(conn);
+
+    int len = -1;
+    if (req_info->query_string != NULL) {
+        len = mg_get_var(req_info->query_string, strlen(req_info->query_string), "filename", out,
+                         out_size);
+    }
+
+    if (len <= 0) {
+        mg_send_http_error(conn, 400, "Missing ?filename=... query parameter");
+        return 0;
+    }
+    return 1;
+}
+
 /* ---------------------------------------------------------------------
  * GET /api/state
  * --------------------------------------------------------------------- */
@@ -354,15 +375,9 @@ static int upload_handler(struct mg_connection *conn, void *cbdata) {
      * "POST /api/upload?filename=benchy.gcode" — simpler than parsing a
      * multipart/form-data body for a single file, at the cost of the
      * frontend needing to URL-encode the filename into the URL instead of
-     * a form field. mg_get_var handles the URL-decoding for us. */
+     * a form field. */
     char filename[256];
-    int filename_len = -1;
-    if (req_info->query_string != NULL) {
-        filename_len = mg_get_var(req_info->query_string, strlen(req_info->query_string),
-                                  "filename", filename, sizeof(filename));
-    }
-    if (filename_len <= 0) {
-        mg_send_http_error(conn, 400, "Missing ?filename=... query parameter");
+    if (!get_filename_query_param(conn, filename, sizeof(filename))) {
         return 1;
     }
 
@@ -450,6 +465,168 @@ static int print_cancel_handler(struct mg_connection *conn, void *cbdata) {
     return 1;
 }
 
+static int print_pause_handler(struct mg_connection *conn, void *cbdata) {
+    AppContext *ctx = (AppContext *)cbdata;
+    const struct mg_request_info *req_info = mg_get_request_info(conn);
+
+    if (strcmp(req_info->request_method, "POST") != 0) {
+        mg_send_http_error(conn, 405, "Use POST");
+        return 1;
+    }
+
+    if (job_manager_pause_print(ctx->state) != 0) {
+        mg_send_http_error(conn, 409, "Not currently printing");
+        return 1;
+    }
+
+    send_ok(conn);
+    return 1;
+}
+
+static int print_resume_handler(struct mg_connection *conn, void *cbdata) {
+    AppContext *ctx = (AppContext *)cbdata;
+    const struct mg_request_info *req_info = mg_get_request_info(conn);
+
+    if (strcmp(req_info->request_method, "POST") != 0) {
+        mg_send_http_error(conn, 405, "Use POST");
+        return 1;
+    }
+
+    if (job_manager_resume_print(ctx->state) != 0) {
+        mg_send_http_error(conn, 409, "Not currently paused");
+        return 1;
+    }
+
+    send_ok(conn);
+    return 1;
+}
+
+/* ---------------------------------------------------------------------
+ * GET /api/files                        — list every gcode file on disk
+ * GET /api/files/content?filename=...   — raw bytes of one file
+ * POST /api/files/select?filename=...   — queue an existing file to print
+ * POST /api/files/delete?filename=...   — remove a file from disk
+ *
+ * Together these back the frontend's "on device" file browser: every
+ * file ever uploaded stays in uploads_dir (see job_manager.h) so it can
+ * be reprinted later without uploading it again.
+ *
+ * Note on GET /api/files/content: rather than parsing gcode thumbnails
+ * and print-time estimates in C, this just hands back the raw file text
+ * and lets the frontend reuse the parsers it already has
+ * (src/lib/gcode-thumbnail.js, src/lib/gcode-print-time.js) — one less
+ * place that logic has to be written and kept correct.
+ * --------------------------------------------------------------------- */
+
+/* How many files the "on device" browser can show at once. A generous
+ * limit for a prototype — if this is ever hit in practice, paging the
+ * list would be a better fix than just raising the number. */
+#define MAX_LISTED_FILES 200
+
+static int files_list_handler(struct mg_connection *conn, void *cbdata) {
+    AppContext *ctx = (AppContext *)cbdata;
+    const struct mg_request_info *req_info = mg_get_request_info(conn);
+
+    if (strcmp(req_info->request_method, "GET") != 0) {
+        mg_send_http_error(conn, 405, "Use GET");
+        return 1;
+    }
+
+    GcodeFileInfo files[MAX_LISTED_FILES];
+    int count = job_manager_list_files(ctx->uploads_dir, files, MAX_LISTED_FILES);
+
+    cJSON *array = cJSON_CreateArray();
+    for (int i = 0; i < count; i++) {
+        cJSON *entry = cJSON_CreateObject();
+        cJSON_AddStringToObject(entry, "filename", files[i].filename);
+        cJSON_AddNumberToObject(entry, "size", (double)files[i].size_bytes);
+        cJSON_AddNumberToObject(entry, "modifiedAt", (double)files[i].modified_unix_time);
+        cJSON_AddItemToArray(array, entry);
+    }
+
+    cJSON *response = cJSON_CreateObject();
+    cJSON_AddItemToObject(response, "files", array);
+    send_json_and_delete(conn, response);
+    return 1;
+}
+
+static int files_content_handler(struct mg_connection *conn, void *cbdata) {
+    AppContext *ctx = (AppContext *)cbdata;
+    const struct mg_request_info *req_info = mg_get_request_info(conn);
+
+    if (strcmp(req_info->request_method, "GET") != 0) {
+        mg_send_http_error(conn, 405, "Use GET");
+        return 1;
+    }
+
+    char filename[256];
+    if (!get_filename_query_param(conn, filename, sizeof(filename))) {
+        return 1;
+    }
+
+    /* Deliberately uses job_manager_file_exists() (read-only) rather than
+     * job_manager_select_existing() here — this route is for previewing
+     * a file's contents (to build a thumbnail/summary in the "on device"
+     * browser), which the frontend may do for every listed file just by
+     * having the browser open. That must NOT have the side effect of
+     * changing which file is actually queued to print. */
+    if (!job_manager_file_exists(ctx->uploads_dir, filename)) {
+        mg_send_http_error(conn, 404, "File not found");
+        return 1;
+    }
+
+    char path[512];
+    snprintf(path, sizeof(path), "%s/%s", ctx->uploads_dir, filename);
+    mg_send_file(conn, path);
+    return 1;
+}
+
+static int files_select_handler(struct mg_connection *conn, void *cbdata) {
+    AppContext *ctx = (AppContext *)cbdata;
+    const struct mg_request_info *req_info = mg_get_request_info(conn);
+
+    if (strcmp(req_info->request_method, "POST") != 0) {
+        mg_send_http_error(conn, 405, "Use POST");
+        return 1;
+    }
+
+    char filename[256];
+    if (!get_filename_query_param(conn, filename, sizeof(filename))) {
+        return 1;
+    }
+
+    if (job_manager_select_existing(ctx->state, ctx->uploads_dir, filename) != 0) {
+        mg_send_http_error(conn, 404, "File not found");
+        return 1;
+    }
+
+    send_ok(conn);
+    return 1;
+}
+
+static int files_delete_handler(struct mg_connection *conn, void *cbdata) {
+    AppContext *ctx = (AppContext *)cbdata;
+    const struct mg_request_info *req_info = mg_get_request_info(conn);
+
+    if (strcmp(req_info->request_method, "POST") != 0) {
+        mg_send_http_error(conn, 405, "Use POST");
+        return 1;
+    }
+
+    char filename[256];
+    if (!get_filename_query_param(conn, filename, sizeof(filename))) {
+        return 1;
+    }
+
+    if (job_manager_delete_file(ctx->state, ctx->uploads_dir, filename) != 0) {
+        mg_send_http_error(conn, 409, "Could not delete file (not found, or currently printing)");
+        return 1;
+    }
+
+    send_ok(conn);
+    return 1;
+}
+
 /* ---------------------------------------------------------------------
  * Registration
  * --------------------------------------------------------------------- */
@@ -463,4 +640,10 @@ void api_handlers_register_all(struct mg_context *ctx, AppContext *app_context) 
     mg_set_request_handler(ctx, "/api/upload", upload_handler, app_context);
     mg_set_request_handler(ctx, "/api/print/start", print_start_handler, app_context);
     mg_set_request_handler(ctx, "/api/print/cancel", print_cancel_handler, app_context);
+    mg_set_request_handler(ctx, "/api/print/pause", print_pause_handler, app_context);
+    mg_set_request_handler(ctx, "/api/print/resume", print_resume_handler, app_context);
+    mg_set_request_handler(ctx, "/api/files", files_list_handler, app_context);
+    mg_set_request_handler(ctx, "/api/files/content", files_content_handler, app_context);
+    mg_set_request_handler(ctx, "/api/files/select", files_select_handler, app_context);
+    mg_set_request_handler(ctx, "/api/files/delete", files_delete_handler, app_context);
 }

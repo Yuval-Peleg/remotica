@@ -24,21 +24,22 @@ Frontend and backend run as a **single process** on the same PC that's physicall
 ### Source layout (`backend/src/`)
 
 - `main.c` — wires everything together: parses `--serial <device>` (optional — omit it to use the simulator, which is the default), starts civetweb, registers routes, runs a background thread that ticks the driver/job manager and broadcasts state roughly every 300ms.
-- `printer_state.h/.c` — `PrinterState`: the single shared, mutex-protected struct holding "what's true about the printer right now" (temps, position, connection, job status/progress). Everything else reads/writes through this.
-- `printer_profile.h/.c` — bed size / max Z / min extrude temp, persisted to `data/profile.json`. Same field names as the frontend's `printer-profile.js` (still hardcoded there — not yet wired to fetch this from the backend).
+- `printer_state.h/.c` — `PrinterState`: the single shared, mutex-protected struct holding "what's true about the printer right now" (temps, position, connection, job status/progress — status is idle/ready/printing/paused). Everything else reads/writes through this.
+- `printer_profile.h/.c` — bed size / max Z / min extrude temp, persisted to `data/profile.json`. The frontend fetches this from `GET /api/profile` on mount instead of hardcoding it.
 - `transport.h` — `PrinterDriver`: the function-pointer interface (connect/disconnect/jog/home/set_target_temp/tick) that decouples the REST API from *how* commands actually reach the printer.
-- `transport_sim.h/.c` — the default driver. No real hardware; fakes temperature drift and instant moves, mirroring `use-printer-temps.js`'s mock behavior in C.
+- `transport_sim.h/.c` — the default driver. No real hardware; fakes temperature drift and instant moves.
 - `transport_serial.h/.c` — the real driver, talks POSIX `termios` + G-code to an actual printer over USB. **Written carefully but not tested against real hardware** (none was available while writing it) — see the warning at the top of `transport_serial.h` before using `--serial` with a real printer. This is exactly the kind of code to run past Opus or test very cautiously first (see the project's memory notes on when to do that).
-- `job_manager.h/.c` — gcode upload (to `data/uploads/`, with filename validation against path traversal) and the print job state machine (idle → ready → printing → ready). Progress while "printing" is a **fake timer** (~30s per print), not real line-by-line streaming to the printer yet — see the big comment on `job_manager_tick()` for what real streaming would need.
-- `api_handlers.h/.c` — every REST route: `GET /api/state`, `POST /api/jog`, `POST /api/home`, `POST /api/temp`, `GET`+`POST /api/profile`, `POST /api/upload?filename=...`, `POST /api/print/start`, `POST /api/print/cancel`. Also where jog/temp inputs get clamped to the profile's physical limits and the cold-extrusion safety check lives (mirrors `ControlPanel.jsx`'s `canExtrude` check, enforced server-side too since a backend shouldn't trust a frontend-only safety check for something with a physical consequence).
+- `job_manager.h/.c` — gcode upload (to `data/uploads/`, with filename validation against path traversal), the print job state machine (idle → ready → printing ⇄ paused → ready), and "on device" file management (list/select/delete previously-uploaded files — files are kept on disk until explicitly deleted, so they can be reprinted without re-uploading). Progress while "printing" is a **fake timer** (~30s per print), not real line-by-line streaming to the printer yet — see the big comment on `job_manager_tick()` for what real streaming would need.
+- `api_handlers.h/.c` — every REST route: `GET /api/state`, `POST /api/jog`, `POST /api/home`, `POST /api/temp`, `GET`+`POST /api/profile`, `POST /api/upload?filename=...`, `POST /api/print/start`, `POST /api/print/pause`, `POST /api/print/resume`, `POST /api/print/cancel`, `GET /api/files`, `GET /api/files/content?filename=...`, `POST /api/files/select?filename=...`, `POST /api/files/delete?filename=...`. Also where jog/temp inputs get clamped to the profile's physical limits and the cold-extrusion safety check lives (mirrors the frontend's `canExtrude` check, enforced server-side too since a backend shouldn't trust a frontend-only safety check for something with a physical consequence).
 - `ws_broadcaster.h/.c` — tracks connected WebSocket clients at `/api/ws` and pushes a state snapshot (same shape as `GET /api/state`) to all of them every tick.
-- `POST /api/command` (defined directly in `main.c`) — the original connectivity smoke-test route, kept for `BackendConnectionTest.jsx`. Delete both together once the frontend is wired to the real endpoints above.
+
+The original `POST /api/command` smoke-test route and its frontend dev panel (`BackendConnectionTest.jsx`) have been removed now that the frontend talks to the real endpoints above.
 
 ### Not done yet
 
-- **Frontend isn't wired to any of this** — `use-printer-temps.js`, `ControlPanel.jsx`'s local jog state, and `printer-profile.js` are all still frontend-only mock data. The backend now has everything they'd need to talk to instead (`GET /api/state`, `POST /api/jog`, etc., plus `/api/ws` for live updates) — wiring that up is the natural next step.
 - **Real print streaming** — `job_manager_tick()`'s progress is a fake timer, not derived from actually sending the queued gcode file to the printer line by line. See that function's doc comment for what's involved.
 - **The serial driver is unverified against real hardware** (see above).
+- **The backend doesn't serve the built frontend yet** — right now they're two separate processes talking over the Vite dev proxy (`frontend/vite.config.js`, `ws: true` for `/api/ws` too). The "single process" deployment model (see above) still needs civetweb's static-file serving wired up to `frontend/dist/` for a production build.
 
 ## Formatting / static analysis
 
