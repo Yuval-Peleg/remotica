@@ -67,13 +67,6 @@ static const struct {
     {115200, B115200},
 };
 
-/* How long a discovery probe waits for a reply from one candidate device
- * at one candidate baud rate before giving up and moving on — much
- * shorter than TIMEOUT_MS_NORMAL, since discovery may need to try several
- * device/baud combinations and each one that ISN'T the printer needs to
- * fail fast for the whole scan to finish in a reasonable time. */
-#define DISCOVERY_PROBE_TIMEOUT_MS 1500
-
 /* How long to wait for "ok" after different kinds of commands. Homing can
  * take a long time (the printer physically has to reach its limit
  * switches), so it gets a much longer allowance than a quick temperature
@@ -91,6 +84,21 @@ static const struct {
 #define TIMEOUT_MS_HOMING 30000
 #define TIMEOUT_MS_LONG_RUNNING 300000
 
+/* How long a discovery probe waits for a reply from one candidate device
+ * at one candidate baud rate before giving up and moving on. Originally
+ * much shorter than this (1.5s) on the theory that a wrong candidate
+ * should fail fast — but a real Ender 3 (Creality's stock, heavily
+ * modified Marlin fork) took long enough to finish booting that the
+ * total probe budget (BOOT_WAIT_SECONDS + this) wasn't enough, and a
+ * real, physically-connected printer got treated as "not a printer" and
+ * silently skipped. Matching TIMEOUT_MS_NORMAL — the same budget the
+ * real connection gets for its own M115 query — trades a slower scan
+ * across multiple WRONG candidates for not missing the RIGHT one, and
+ * means "discovery found it" reliably implies "a real connect would too."
+ * The correct tradeoff either way, since in practice there's usually
+ * only one or two candidate devices to try. */
+#define DISCOVERY_PROBE_TIMEOUT_MS TIMEOUT_MS_NORMAL
+
 /* How many times to resend a single line before giving up on it — see
  * send_checksummed_line() below. This driver never has more than one
  * line outstanding at a time (it always waits for a reply before sending
@@ -101,10 +109,12 @@ static const struct {
 /* Arduino-compatible boards (which is what most 3D printer mainboards
  * are) reset themselves when a serial connection is opened — this is a
  * side effect of the DTR signal toggling, not something we control. After
- * a reset, the firmware takes a couple of seconds to boot up before it's
- * ready to accept commands. We wait this long after opening before
- * treating the connection as ready. */
-#define BOOT_WAIT_SECONDS 2
+ * a reset, the firmware takes a few seconds to boot up before it's ready
+ * to accept commands — stock Creality boards in particular tend toward
+ * the slower end of that (LCD splash screen, SD card init) before the
+ * serial command parser is actually listening. We wait this long after
+ * opening before treating the connection as ready. */
+#define BOOT_WAIT_SECONDS 3
 
 /* Only ask the printer for a fresh temperature reading every N ticks
  * (main.c ticks roughly every 300ms), so we're not spamming M105 far
@@ -542,6 +552,18 @@ static int open_and_configure(const char *device_path, long baud, int *out_fd) {
      * mode we actually want below. */
     int fd = open(device_path, O_RDWR | O_NOCTTY | O_NONBLOCK);
     if (fd < 0) {
+        /* Logged here (not left for the caller) specifically because an
+         * open() failure is worth knowing about even during discovery's
+         * scan of several candidates — unlike "no reply within the
+         * timeout" (an expected, silent outcome for every candidate that
+         * just isn't a printer), a failure here almost always means
+         * something actionable: most commonly EACCES because the
+         * device's group ownership (typically "dialout" on Linux) does
+         * not include the current user. Without this, that looked
+         * identical to "nothing plugged in" — a real printer, physically
+         * connected, was silently treated the same as no printer at all,
+         * with no way to tell the two apart from the output. */
+        fprintf(stderr, "  could not open %s: %s\n", device_path, strerror(errno));
         return -1;
     }
 
