@@ -177,13 +177,7 @@ export function Dashboard() {
       </section>
 
       <section className="flex flex-col gap-4">
-        <Card className="overflow-hidden py-0">
-          <img
-            src="/images/placeholder2.jpg"
-            alt="Webcam stream"
-            className="aspect-video w-full object-cover"
-          />
-        </Card>
+        <CameraView />
 
         <Card>
           <CardContent>
@@ -200,8 +194,6 @@ export function Dashboard() {
             />
           </CardContent>
         </Card>
-
-        <CameraView />
 
         <Card>
           <CardContent>
