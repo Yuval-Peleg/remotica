@@ -32,3 +32,4 @@ Frontend and backend run as a **single process** on the same PC that's physicall
 - Only `frontend/` (and this file) are tracked. `legacy-static/` and `images/` are gitignored on purpose.
 - Git identity is already configured (`Yuval Peleg`, a GitHub noreply email) — **never run `git config` to change it**, that email was deliberately chosen.
 - Repo is public: https://github.com/Yuval-Peleg/remotica — README explicitly warns it's not ready for real printer use; MIT LICENSE backs that disclaimer.
+- **Committing and pushing to this repo is pre-authorized** (confirmed 2026-07-31) — no need to ask before each commit/push, use judgment on when a chunk of work is worth committing and split into logical commits rather than one giant one.
