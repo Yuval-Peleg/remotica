@@ -6,6 +6,12 @@ const SNAP_MM = 1;
 const GRID_CELL_MM = 10;
 const DOUBLE_TAP_MS = 350;
 const DOUBLE_TAP_DIST_PX = 24;
+// Safety net for the drag preview (see the effect below): if the real
+// position never quite matches what we asked for — the jog request
+// failed, or landed on a slightly different clamped value — don't leave
+// the marker stuck showing a stale preview forever.
+const PREVIEW_FALLBACK_MS = 1000;
+const POSITION_EPSILON_MM = 0.001;
 
 function snap(value, step) {
   return Math.round(value / step) * step;
@@ -19,9 +25,10 @@ function clamp(value, min, max) {
 // deltaMm)` is called at most twice per drag gesture (once for X, once for
 // Y) — right when the pointer is released, not on every pointermove — so
 // dragging around the bed doesn't fire dozens of network requests. While
-// actively dragging, the marker/coordinates show a locally-tracked preview
-// position instead of `position`, so the drag still feels instant even
-// though the real move hasn't been sent yet.
+// actively dragging (and for a moment after release, until the backend's
+// real position catches up), the marker/coordinates show a locally-tracked
+// preview position instead of `position`, so the drag feels instant and
+// doesn't visibly snap back to the old spot while waiting on the network.
 export function BedSchematic({
   position,
   bedWidthMm,
@@ -35,6 +42,7 @@ export function BedSchematic({
   const [schematicHeight, setSchematicHeight] = useState(0);
   const lastTapRef = useRef({ time: 0, x: 0, y: 0 });
   const dragStartPositionRef = useRef(position);
+  const previewFallbackTimerRef = useRef(null);
 
   // Measured directly (rather than relying on CSS grid/flex stretch, which
   // doesn't reliably match an aspect-ratio sibling's height) so the vertical
@@ -48,6 +56,25 @@ export function BedSchematic({
     observer.observe(el);
     return () => observer.disconnect();
   }, []);
+
+  // Once the backend reports back a position that matches what we last
+  // committed, drop the local preview and let the real position take over
+  // — clearing it immediately on release would flash back to the pre-drag
+  // spot for the ~300ms until the next state update arrives, which looked
+  // like the marker jumping backward before jumping to the right place.
+  useEffect(() => {
+    if (!previewPosition) return;
+    const matches =
+      Math.abs(position.x - previewPosition.x) < POSITION_EPSILON_MM &&
+      Math.abs(position.y - previewPosition.y) < POSITION_EPSILON_MM;
+    if (matches) {
+      clearTimeout(previewFallbackTimerRef.current);
+      setPreviewPosition(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [position]);
+
+  useEffect(() => () => clearTimeout(previewFallbackTimerRef.current), []);
 
   const updateFromPointer = (clientX, clientY) => {
     const rect = areaRef.current.getBoundingClientRect();
@@ -88,13 +115,29 @@ export function BedSchematic({
     if (!dragging) return;
     setDragging(false);
 
-    if (previewPosition) {
-      const deltaX = previewPosition.x - dragStartPositionRef.current.x;
-      const deltaY = previewPosition.y - dragStartPositionRef.current.y;
-      if (deltaX !== 0) onJog("X", deltaX);
-      if (deltaY !== 0) onJog("Y", deltaY);
+    const target = previewPosition;
+    if (!target) return;
+
+    const deltaX = target.x - dragStartPositionRef.current.x;
+    const deltaY = target.y - dragStartPositionRef.current.y;
+
+    if (deltaX === 0 && deltaY === 0) {
+      setPreviewPosition(null);
+      return;
     }
-    setPreviewPosition(null);
+
+    if (deltaX !== 0) onJog("X", deltaX);
+    if (deltaY !== 0) onJog("Y", deltaY);
+
+    // Keep showing `target` (set above, already the current previewPosition)
+    // until the effect above sees the real position catch up, with a
+    // timeout fallback in case it never quite matches (a failed request,
+    // an unexpected clamp) so the marker doesn't get stuck.
+    clearTimeout(previewFallbackTimerRef.current);
+    previewFallbackTimerRef.current = setTimeout(
+      () => setPreviewPosition(null),
+      PREVIEW_FALLBACK_MS
+    );
   };
 
   const displayPosition = previewPosition ?? position;
@@ -151,10 +194,12 @@ export function BedSchematic({
       </div>
 
       <div className="flex flex-col items-center text-center text-xs text-muted-foreground">
-        <p className="flex items-center justify-center gap-1">
-          X {displayPosition.x.toFixed(1)}mm &middot; Y{" "}
-          {displayPosition.y.toFixed(1)}mm
-          {isHomed && <Home className="size-3 text-primary" />}
+        <p className="flex items-center justify-center gap-1.5">
+          {isHomed && <Home className="size-3 shrink-0 text-primary" />}
+          <span>
+            X {displayPosition.x.toFixed(1)}mm &middot; Y{" "}
+            {displayPosition.y.toFixed(1)}mm
+          </span>
         </p>
         <p>tap or drag to jog &middot; double-tap to home</p>
       </div>

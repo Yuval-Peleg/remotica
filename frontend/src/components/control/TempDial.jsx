@@ -7,6 +7,14 @@ const SIZE = 88;
 const STROKE_WIDTH = 8;
 const RADIUS = (SIZE - STROKE_WIDTH) / 2;
 const CIRCUMFERENCE = 2 * Math.PI * RADIUS;
+// A real reading hovering right around 0 (ambient temp with sensor jitter,
+// see transport_sim.c) would otherwise push the ring's progress to exactly
+// 0 sometimes and a hair above it other times — the colored arc would
+// fully vanish then instantly reappear as a sliver, which reads as
+// flickering rather than "it's just near zero". Flooring it at a small
+// visible minimum keeps a constant sliver on screen so the ring never
+// disappears, regardless of how close to 0 the actual reading is.
+const MIN_VISIBLE_PROGRESS = 0.015;
 
 export function TempDial({
   label,
@@ -19,7 +27,10 @@ export function TempDial({
   minTarget = 0,
   maxTarget = 280,
 }) {
-  const progress = Math.min(current / MAX_TEMP, 1);
+  const progress = Math.max(
+    Math.min(current / MAX_TEMP, 1),
+    MIN_VISIBLE_PROGRESS
+  );
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(String(target));
 
