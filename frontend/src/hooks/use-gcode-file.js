@@ -1,4 +1,6 @@
 import { useCallback, useState } from "react";
+import { api } from "@/lib/api";
+import { useFilePreview } from "@/hooks/use-file-preview";
 import { extractGcodeThumbnail } from "@/lib/gcode-thumbnail";
 import { extractGcodePrintTimeSeconds } from "@/lib/gcode-print-time";
 
@@ -7,11 +9,16 @@ import { extractGcodePrintTimeSeconds } from "@/lib/gcode-print-time";
 // huge) gcode file.
 const HEADER_SLICE_BYTES = 2_000_000;
 
+// Handles picking a local .gcode file: validates the extension, parses its
+// embedded thumbnail/print-time client-side for instant feedback, and
+// uploads it to the backend so it's actually saved on the PC running this
+// app (see POST /api/upload in api_handlers.c). The queued file's name,
+// status, and progress all come from the backend's live state instead
+// (usePrinterState) — this hook is only responsible for the "picking and
+// uploading" step, not for tracking what's currently selected.
 export function useGcodeFile() {
-  const [file, setFile] = useState(null);
-  const [thumbnail, setThumbnail] = useState(null);
-  const [printTimeSeconds, setPrintTimeSeconds] = useState(null);
   const [error, setError] = useState(null);
+  const [uploading, setUploading] = useState(false);
 
   const selectFile = useCallback((selected) => {
     if (!selected) return;
@@ -22,25 +29,23 @@ export function useGcodeFile() {
     }
 
     setError(null);
-    setFile(selected);
-    setThumbnail(null);
-    setPrintTimeSeconds(null);
 
     const reader = new FileReader();
     reader.onload = () => {
       const text = reader.result ?? "";
-      setThumbnail(extractGcodeThumbnail(text));
-      setPrintTimeSeconds(extractGcodePrintTimeSeconds(text));
+      useFilePreview.cache(selected.name, {
+        thumbnail: extractGcodeThumbnail(text),
+        printTimeSeconds: extractGcodePrintTimeSeconds(text),
+      });
     };
     reader.readAsText(selected.slice(0, HEADER_SLICE_BYTES));
+
+    setUploading(true);
+    api
+      .uploadFile(selected)
+      .catch(() => setError("Couldn't upload the file to the backend."))
+      .finally(() => setUploading(false));
   }, []);
 
-  const clearFile = useCallback(() => {
-    setFile(null);
-    setThumbnail(null);
-    setPrintTimeSeconds(null);
-    setError(null);
-  }, []);
-
-  return { file, thumbnail, printTimeSeconds, error, selectFile, clearFile };
+  return { error, uploading, selectFile };
 }

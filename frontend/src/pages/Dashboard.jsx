@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { Printer } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Pause, Play, Printer, Square } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
@@ -8,16 +8,28 @@ import { ControlPanel } from "@/components/control/ControlPanel";
 import { TemperatureGraph } from "@/components/control/TemperatureGraph";
 import { ConnectionStatus } from "@/components/dashboard/ConnectionStatus";
 import { GcodeDropzone } from "@/components/dashboard/GcodeDropzone";
-import { BackendConnectionTest } from "@/components/dashboard/BackendConnectionTest";
-import { usePrinterTemps } from "@/hooks/use-printer-temps";
+import { OnDeviceFiles } from "@/components/dashboard/OnDeviceFiles";
+import { usePrinterState } from "@/hooks/use-printer-state";
 import { useGcodeFile } from "@/hooks/use-gcode-file";
+import { useFilePreview } from "@/hooks/use-file-preview";
+import { api } from "@/lib/api";
 import { formatDurationShort } from "@/lib/gcode-print-time";
 import { cn } from "@/lib/utils";
 
-// Placeholder — will come from a real printer connection later.
-const CONNECTION = {
-  connected: true,
-  connectionType: "usb", // "usb" | "wifi"
+// Used only until GET /api/profile resolves on mount, so the control panel
+// has sane numbers to render for the first frame instead of nothing.
+const DEFAULT_PROFILE = {
+  bedWidthMm: 220,
+  bedDepthMm: 220,
+  maxZMm: 250,
+  minExtrudeTempC: 170,
+};
+
+const JOB_STATUS_LABELS = {
+  idle: "Idle",
+  ready: "Ready to print",
+  printing: "Printing",
+  paused: "Paused",
 };
 
 function StatRow({ label, value }) {
@@ -30,41 +42,46 @@ function StatRow({ label, value }) {
 }
 
 export function Dashboard() {
-  const { connected, connectionType } = CONNECTION;
-  const { hotend, bed, setHotendTarget, setBedTarget, history } =
-    usePrinterTemps();
   const {
-    file: queuedFile,
-    thumbnail,
-    printTimeSeconds,
-    error: fileError,
-    selectFile,
-    clearFile,
-  } = useGcodeFile();
-  const [isPrinting, setIsPrinting] = useState(false);
+    connected,
+    connectionType,
+    hotend,
+    bed,
+    position,
+    job,
+    history,
+    jog,
+    home,
+    setHotendTarget,
+    setBedTarget,
+  } = usePrinterState();
 
-  const fileLabel = queuedFile
-    ? queuedFile.name.replace(/\.gcode$/i, "")
+  const [profile, setProfile] = useState(DEFAULT_PROFILE);
+  useEffect(() => {
+    api
+      .getProfile()
+      .then(setProfile)
+      .catch(() => {});
+  }, []);
+
+  const { error: uploadError, selectFile } = useGcodeFile();
+  const { thumbnail, printTimeSeconds } = useFilePreview(job.filename || null);
+
+  const hasFile = job.status !== "idle";
+  const isPaused = job.status === "paused";
+  const isPrintActive = job.status === "printing" || isPaused;
+
+  const fileLabel = hasFile
+    ? job.filename.replace(/\.gcode$/i, "")
     : "No file selected";
-
-  const state = !connected
-    ? "Disconnected"
-    : isPrinting
-      ? "Printing"
-      : queuedFile
-        ? "Ready to print"
-        : "Idle";
+  const state = !connected ? "Disconnected" : JOB_STATUS_LABELS[job.status];
 
   const printTime = formatDurationShort(printTimeSeconds);
-  // Real progress will come from the printer once a backend exists — for
-  // now it's always 0%, so the full estimate is still "remaining".
-  const progress = 0;
+  // Time left will be able to come from real progress once printing streams
+  // the actual file instead of the backend's placeholder timer — see the
+  // comment on job_manager_tick() in the backend for why that's not done
+  // yet. Until then this just mirrors the total estimate.
   const printTimeLeft = printTime;
-
-  const handleClear = () => {
-    setIsPrinting(false);
-    clearFile();
-  };
 
   return (
     <main className="mx-auto grid max-w-7xl gap-6 px-4 py-6 sm:px-6 lg:grid-cols-[minmax(0,360px)_1fr] lg:px-8">
@@ -77,21 +94,46 @@ export function Dashboard() {
             />
 
             <GcodeDropzone
-              file={queuedFile}
+              filename={job.filename || null}
               thumbnail={thumbnail}
-              error={fileError}
+              error={uploadError}
+              locked={isPrintActive}
               onSelect={selectFile}
-              onClear={handleClear}
+              onClear={() => api.printCancel().catch(() => {})}
             />
 
-            <Button
-              className="w-full"
-              disabled={!queuedFile || isPrinting}
-              onClick={() => setIsPrinting(true)}
-            >
-              <Printer />
-              Print
-            </Button>
+            {isPrintActive ? (
+              <div className="flex gap-2">
+                <Button
+                  className="flex-1 bg-amber-500 text-amber-950 hover:bg-amber-500/80"
+                  onClick={() =>
+                    (isPaused ? api.printResume() : api.printPause()).catch(
+                      () => {}
+                    )
+                  }
+                >
+                  {isPaused ? <Play /> : <Pause />}
+                  {isPaused ? "Resume" : "Pause"}
+                </Button>
+                <Button
+                  variant="destructive"
+                  className="flex-1"
+                  onClick={() => api.printCancel().catch(() => {})}
+                >
+                  <Square />
+                  Stop
+                </Button>
+              </div>
+            ) : (
+              <Button
+                className="w-full"
+                disabled={job.status !== "ready"}
+                onClick={() => api.printStart().catch(() => {})}
+              >
+                <Printer />
+                Print
+              </Button>
+            )}
 
             <div>
               <StatRow label="State" value={state} />
@@ -99,7 +141,7 @@ export function Dashboard() {
               <div
                 className={cn(
                   "grid transition-[grid-template-rows] duration-300 ease-in-out",
-                  queuedFile ? "grid-rows-[1fr]" : "grid-rows-[0fr]"
+                  hasFile ? "grid-rows-[1fr]" : "grid-rows-[0fr]"
                 )}
               >
                 <div className="overflow-hidden">
@@ -111,12 +153,18 @@ export function Dashboard() {
                   <div className="flex flex-col gap-1.5 pt-4">
                     <div className="flex items-center justify-between text-xs text-muted-foreground">
                       <span>Progress</span>
-                      <span>{progress}%</span>
+                      <span>{Math.round(job.progress)}%</span>
                     </div>
-                    <Progress value={progress} />
+                    <Progress value={job.progress} />
                   </div>
                 </div>
               </div>
+
+              <OnDeviceFiles
+                currentFilename={job.filename}
+                printActive={isPrintActive}
+                refreshTrigger={job.filename}
+              />
             </div>
           </CardContent>
         </Card>
@@ -136,6 +184,11 @@ export function Dashboard() {
             <ControlPanel
               hotend={hotend}
               bed={bed}
+              position={position}
+              jobStatus={job.status}
+              profile={profile}
+              jog={jog}
+              home={home}
               setHotendTarget={setHotendTarget}
               setBedTarget={setBedTarget}
             />
@@ -151,8 +204,6 @@ export function Dashboard() {
             />
           </CardContent>
         </Card>
-
-        <BackendConnectionTest />
       </section>
     </main>
   );

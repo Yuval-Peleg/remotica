@@ -15,8 +15,13 @@ export default defineConfig({
     // Forward API calls to the C backend during development. In
     // production the backend serves the built frontend itself, so
     // requests to /api are already same-origin and this isn't needed.
+    // ws: true is required for /api/ws (the live state WebSocket) to be
+    // proxied too — the plain string shorthand only forwards plain HTTP.
     proxy: {
-      "/api": "http://localhost:8080",
+      "/api": {
+        target: "http://localhost:8080",
+        ws: true,
+      },
     },
   },
 });

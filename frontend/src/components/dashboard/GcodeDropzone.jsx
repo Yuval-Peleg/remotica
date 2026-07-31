@@ -4,7 +4,14 @@ import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { cn } from "@/lib/utils";
 
-export function GcodeDropzone({ file, thumbnail, error, onSelect, onClear }) {
+export function GcodeDropzone({
+  filename,
+  thumbnail,
+  error,
+  locked,
+  onSelect,
+  onClear,
+}) {
   const [isDragOver, setIsDragOver] = useState(false);
 
   const handleDrop = (event) => {
@@ -14,13 +21,13 @@ export function GcodeDropzone({ file, thumbnail, error, onSelect, onClear }) {
     if (dropped) onSelect(dropped);
   };
 
-  if (file) {
+  if (filename) {
     return (
       <div className="relative aspect-square w-full overflow-hidden rounded-lg border border-border bg-secondary/40">
         {thumbnail ? (
           <img
             src={thumbnail}
-            alt={`${file.name} thumbnail`}
+            alt={`${filename} thumbnail`}
             className="h-full w-full object-cover"
           />
         ) : (
@@ -29,16 +36,18 @@ export function GcodeDropzone({ file, thumbnail, error, onSelect, onClear }) {
             <span className="text-xs">No preview available</span>
           </div>
         )}
-        <Button
-          type="button"
-          variant="secondary"
-          size="icon"
-          className="absolute top-2 right-2 size-7"
-          onClick={onClear}
-        >
-          <X className="size-4" />
-          <span className="sr-only">Remove file</span>
-        </Button>
+        {!locked && (
+          <Button
+            type="button"
+            variant="secondary"
+            size="icon"
+            className="absolute top-2 right-2 size-7"
+            onClick={onClear}
+          >
+            <X className="size-4" />
+            <span className="sr-only">Remove file</span>
+          </Button>
+        )}
       </div>
     );
   }

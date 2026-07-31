@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp } from "lucide-react";
-import { PRINTER_PROFILE } from "@/lib/printer-profile";
+import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Home } from "lucide-react";
 
 // XY jog is always 1mm resolution — no user-facing step control for this axis.
 const SNAP_MM = 1;
@@ -16,11 +15,26 @@ function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max);
 }
 
-export function BedSchematic({ position, onChange, onHome }) {
+// `position` is the authoritative position from the backend. `onJog(axis,
+// deltaMm)` is called at most twice per drag gesture (once for X, once for
+// Y) — right when the pointer is released, not on every pointermove — so
+// dragging around the bed doesn't fire dozens of network requests. While
+// actively dragging, the marker/coordinates show a locally-tracked preview
+// position instead of `position`, so the drag still feels instant even
+// though the real move hasn't been sent yet.
+export function BedSchematic({
+  position,
+  bedWidthMm,
+  bedDepthMm,
+  onJog,
+  onHome,
+}) {
   const areaRef = useRef(null);
   const [dragging, setDragging] = useState(false);
+  const [previewPosition, setPreviewPosition] = useState(null);
   const [schematicHeight, setSchematicHeight] = useState(0);
   const lastTapRef = useRef({ time: 0, x: 0, y: 0 });
+  const dragStartPositionRef = useRef(position);
 
   // Measured directly (rather than relying on CSS grid/flex stretch, which
   // doesn't reliably match an aspect-ratio sibling's height) so the vertical
@@ -40,17 +54,9 @@ export function BedSchematic({ position, onChange, onHome }) {
     const relX = clamp((clientX - rect.left) / rect.width, 0, 1);
     // Bed origin is bottom-left, so invert Y: top of the box = back of the bed.
     const relY = 1 - clamp((clientY - rect.top) / rect.height, 0, 1);
-    const x = clamp(
-      snap(relX * PRINTER_PROFILE.bedWidthMm, SNAP_MM),
-      0,
-      PRINTER_PROFILE.bedWidthMm
-    );
-    const y = clamp(
-      snap(relY * PRINTER_PROFILE.bedDepthMm, SNAP_MM),
-      0,
-      PRINTER_PROFILE.bedDepthMm
-    );
-    onChange({ x, y });
+    const x = clamp(snap(relX * bedWidthMm, SNAP_MM), 0, bedWidthMm);
+    const y = clamp(snap(relY * bedDepthMm, SNAP_MM), 0, bedDepthMm);
+    setPreviewPosition({ x, y });
   };
 
   const handlePointerDown = (e) => {
@@ -67,6 +73,7 @@ export function BedSchematic({ position, onChange, onHome }) {
     }
 
     lastTapRef.current = { time: now, x: e.clientX, y: e.clientY };
+    dragStartPositionRef.current = position;
     e.currentTarget.setPointerCapture(e.pointerId);
     setDragging(true);
     updateFromPointer(e.clientX, e.clientY);
@@ -77,12 +84,24 @@ export function BedSchematic({ position, onChange, onHome }) {
     updateFromPointer(e.clientX, e.clientY);
   };
 
-  const markerLeftPct = (position.x / PRINTER_PROFILE.bedWidthMm) * 100;
-  const markerTopPct = 100 - (position.y / PRINTER_PROFILE.bedDepthMm) * 100;
-  const gridDivisions = Math.max(
-    2,
-    Math.round(PRINTER_PROFILE.bedWidthMm / GRID_CELL_MM)
-  );
+  const commit = () => {
+    if (!dragging) return;
+    setDragging(false);
+
+    if (previewPosition) {
+      const deltaX = previewPosition.x - dragStartPositionRef.current.x;
+      const deltaY = previewPosition.y - dragStartPositionRef.current.y;
+      if (deltaX !== 0) onJog("X", deltaX);
+      if (deltaY !== 0) onJog("Y", deltaY);
+    }
+    setPreviewPosition(null);
+  };
+
+  const displayPosition = previewPosition ?? position;
+  const isHomed = position.x === 0 && position.y === 0;
+  const markerLeftPct = (displayPosition.x / bedWidthMm) * 100;
+  const markerTopPct = 100 - (displayPosition.y / bedDepthMm) * 100;
+  const gridDivisions = Math.max(2, Math.round(bedWidthMm / GRID_CELL_MM));
 
   return (
     <div className="flex flex-col gap-2">
@@ -92,7 +111,7 @@ export function BedSchematic({ position, onChange, onHome }) {
           <ArrowLeft className="size-3.5 shrink-0" />
           <div className="mx-1 h-px flex-1 bg-muted-foreground/50" />
           <span className="shrink-0 bg-card px-1 text-[10px]">
-            {PRINTER_PROFILE.bedWidthMm}mm
+            {bedWidthMm}mm
           </span>
           <div className="mx-1 h-px flex-1 bg-muted-foreground/50" />
           <ArrowRight className="size-3.5 shrink-0" />
@@ -107,7 +126,7 @@ export function BedSchematic({ position, onChange, onHome }) {
           <ArrowUp className="size-3.5 shrink-0" />
           <div className="my-1 w-px flex-1 bg-muted-foreground/50" />
           <span className="shrink-0 bg-card px-0.5 text-[10px] [writing-mode:vertical-rl] rotate-180">
-            {PRINTER_PROFILE.bedDepthMm}mm
+            {bedDepthMm}mm
           </span>
           <div className="my-1 w-px flex-1 bg-muted-foreground/50" />
           <ArrowDown className="size-3.5 shrink-0" />
@@ -117,8 +136,8 @@ export function BedSchematic({ position, onChange, onHome }) {
           ref={areaRef}
           onPointerDown={handlePointerDown}
           onPointerMove={handlePointerMove}
-          onPointerUp={() => setDragging(false)}
-          onPointerCancel={() => setDragging(false)}
+          onPointerUp={commit}
+          onPointerCancel={commit}
           className="relative aspect-square w-full flex-1 touch-none cursor-crosshair rounded-lg border border-border bg-secondary/40 bg-[linear-gradient(to_right,var(--color-border)_1px,transparent_1px),linear-gradient(to_bottom,var(--color-border)_1px,transparent_1px)]"
           style={{
             backgroundSize: `${100 / gridDivisions}% ${100 / gridDivisions}%`,
@@ -132,8 +151,10 @@ export function BedSchematic({ position, onChange, onHome }) {
       </div>
 
       <div className="flex flex-col items-center text-center text-xs text-muted-foreground">
-        <p>
-          X {position.x.toFixed(1)}mm &middot; Y {position.y.toFixed(1)}mm
+        <p className="flex items-center justify-center gap-1">
+          X {displayPosition.x.toFixed(1)}mm &middot; Y{" "}
+          {displayPosition.y.toFixed(1)}mm
+          {isHomed && <Home className="size-3 text-primary" />}
         </p>
         <p>tap or drag to jog &middot; double-tap to home</p>
       </div>
