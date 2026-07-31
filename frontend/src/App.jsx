@@ -1,6 +1,7 @@
 import { BrowserRouter, Routes, Route } from "react-router-dom";
 import { Navbar } from "@/components/Navbar";
 import { Dashboard } from "@/pages/Dashboard";
+import { Settings } from "@/pages/Settings";
 import { PlaceholderPage } from "@/pages/Placeholder";
 
 function App() {
@@ -11,10 +12,7 @@ function App() {
         <Routes>
           <Route path="/" element={<Dashboard />} />
           <Route path="/system" element={<PlaceholderPage title="System" />} />
-          <Route
-            path="/settings"
-            element={<PlaceholderPage title="Settings" />}
-          />
+          <Route path="/settings" element={<Settings />} />
           <Route path="/about" element={<PlaceholderPage title="About" />} />
         </Routes>
       </div>

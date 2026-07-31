@@ -39,6 +39,11 @@ export const api = {
   getProfile: () => requestJson("/api/profile"),
   setProfile: (partialProfile) => postJson("/api/profile", partialProfile),
 
+  getPrinterDatabase: async () => {
+    const { printers } = await requestJson("/api/printer-database");
+    return printers;
+  },
+
   uploadFile: (file) =>
     requestJson(`/api/upload?filename=${encodeURIComponent(file.name)}`, {
       method: "POST",

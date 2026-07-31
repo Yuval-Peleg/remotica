@@ -24,6 +24,8 @@ const DEFAULT_PROFILE = {
   bedDepthMm: 220,
   maxZMm: 250,
   minExtrudeTempC: 170,
+  maxHotendTempC: 280,
+  maxBedTempC: 120,
 };
 
 const JOB_STATUS_LABELS = {

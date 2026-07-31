@@ -76,6 +76,7 @@ export function ControlPanel({
             current={hotend.current}
             target={hotend.target}
             onTargetChange={setHotendTarget}
+            maxTarget={profile.maxHotendTempC}
           />
           <TempDial
             label="Bed"
@@ -84,7 +85,7 @@ export function ControlPanel({
             current={bed.current}
             target={bed.target}
             onTargetChange={setBedTarget}
-            maxTarget={120}
+            maxTarget={profile.maxBedTempC}
           />
         </div>
       </div>
