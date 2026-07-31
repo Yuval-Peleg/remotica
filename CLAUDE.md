@@ -5,7 +5,7 @@ An from-scratch, OctoPrint-inspired remote control dashboard for 3D printers. Da
 ## Repo layout
 
 - `frontend/` — the active app. See `frontend/CLAUDE.md` for details.
-- `backend/` — not started yet. Planned: C, using Mongoose (embedded HTTP + WebSocket server) and cJSON. See "Planned backend" below.
+- `backend/` — started. C, using civetweb (embedded HTTP + WebSocket server) and cJSON, both vendored under `backend/third_party/`. See "Planned backend" below.
 - `legacy-static/`, `images/` — old hand-built mockup, kept on disk for reference only. Gitignored on purpose — do not re-add to git without asking.
 
 ## Deployment model
@@ -15,16 +15,19 @@ Frontend and backend run as a **single process** on the same PC that's physicall
 ## Planned backend
 
 - **Language:** C — deliberate choice, not a placeholder.
-- **HTTP + WebSocket:** [Mongoose](https://mongoose.ws/), one embeddable library for both.
-- **JSON:** [cJSON](https://github.com/DaveGamble/cJSON).
-- **API shape:** REST for one-off actions (upload gcode, start/pause/cancel print, jog, set temps, get/set printer profile). WebSocket for continuous push of live state (temps, position, progress, logs) to every connected browser.
-- **Target OS:** Linux first, headless-compatible (Ubuntu Server, no GUI needed — none of the planned libraries touch a display). A Windows fork is planned for later; only the serial layer (POSIX `termios` → Win32 serial API) should need to change, since Mongoose/cJSON are already cross-platform.
-- **Printer link:** USB serial, G-code in/out, parsed printer replies (temperature reports, `ok`, errors/resend).
-- Once this exists, the frontend's mock hooks (`use-printer-temps.js`, local jog state in `ControlPanel.jsx`, printer profile in `printer-profile.js`) need to flip from generating fake state to syncing from the backend.
+- **HTTP + WebSocket:** [civetweb](https://github.com/civetweb/civetweb) (MIT), one embeddable library for both. **Not Mongoose** — Mongoose looked like the obvious pick early on, but it's dual-licensed GPLv2/commercial with no permissive option, which would force this MIT-licensed repo to either go GPL or pay for a commercial license. civetweb is a permissively-licensed sibling (same original codebase lineage) with the same HTTP+WebSocket feature set, so it was swapped in instead. If any other C dependency gets added later, check its license before vendoring it — same issue could recur.
+- **JSON:** [cJSON](https://github.com/DaveGamble/cJSON) (MIT).
+- Both vendored as source under `backend/third_party/` (civetweb 1.16, cJSON 1.7.19) — no package manager, just `.c`/`.h` files compiled straight into the binary. Their upstream LICENSE files are kept alongside them.
+- **API shape:** REST for one-off actions (upload gcode, start/pause/cancel print, jog, set temps, get/set printer profile). WebSocket for continuous push of live state (temps, position, progress, logs) to every connected browser. So far only a `POST /api/command` smoke-test route exists (`backend/src/main.c`) — it parses whatever JSON body it's sent, prints it to stdout, and echoes it back. It's not a real command yet, just proof the frontend can reach the backend.
+- **Build:** `cd backend && make` → `backend/build/remotica-backend`. Built with `NO_SSL` (no HTTPS needed on LAN) and `USE_WEBSOCKET` defined. Needs a C toolchain (`gcc`/`make`) — not installed on this machine yet, install via `sudo apt-get install build-essential`.
+- **Target OS:** Linux first, headless-compatible (Ubuntu Server, no GUI needed — none of the planned libraries touch a display). A Windows fork is planned for later; only the serial layer (POSIX `termios` → Win32 serial API) should need to change, since civetweb/cJSON are already cross-platform.
+- **Printer link:** USB serial, G-code in/out, parsed printer replies (temperature reports, `ok`, errors/resend). Not built yet.
+- **Frontend dev proxy:** `frontend/vite.config.js` proxies `/api` → `http://localhost:8080` during `npm run dev`, so the frontend can call relative `/api/...` URLs without CORS setup. In production the backend serves the built frontend itself (same origin), so the proxy isn't needed there.
+- Once real backend state exists, the frontend's mock hooks (`use-printer-temps.js`, local jog state in `ControlPanel.jsx`, printer profile in `printer-profile.js`) need to flip from generating fake state to syncing from the backend. `frontend/src/components/dashboard/BackendConnectionTest.jsx` is a **temporary** dev-only panel for testing the connection — remove it once real controls talk to the backend for real.
 
 ## Formatting / static analysis
 
-- **C** (once `backend/` exists): `.clang-format` at repo root (LLVM base, 4-space indent, 100 col). Run `clang-format -i <files>`. Use `cppcheck` for static analysis. Neither is installed yet — install via `sudo apt-get install clang-format cppcheck`.
+- **C:** `.clang-format` at repo root (LLVM base, 4-space indent, 100 col). Run `clang-format -i backend/src/*.c` (don't run it on `backend/third_party/` — that's vendored upstream code, leave it as-is). Use `cppcheck backend/src/` for static analysis. None of `clang-format`/`cppcheck`/a C toolchain are installed yet — install via `sudo apt-get install build-essential clang-format cppcheck`.
 - **Frontend:** see `frontend/CLAUDE.md`.
 
 ## Git
