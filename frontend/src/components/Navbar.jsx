@@ -1,5 +1,5 @@
 import { Link, NavLink } from "react-router-dom";
-import { Menu, Printer } from "lucide-react";
+import { Menu } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Sheet,
@@ -50,12 +50,6 @@ export function Navbar() {
           {navLinks.map((link) => (
             <NavItem key={link.to} {...link} />
           ))}
-          <Button asChild>
-            <Link to="/">
-              <Printer />
-              Print
-            </Link>
-          </Button>
         </div>
 
         <Sheet>
@@ -86,14 +80,6 @@ export function Navbar() {
                   </NavLink>
                 </SheetClose>
               ))}
-              <SheetClose asChild>
-                <Button asChild className="mt-2">
-                  <Link to="/">
-                    <Printer />
-                    Print
-                  </Link>
-                </Button>
-              </SheetClose>
             </div>
           </SheetContent>
         </Sheet>
