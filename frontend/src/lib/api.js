@@ -71,4 +71,6 @@ export const api = {
     post(`/api/files/select?filename=${encodeURIComponent(filename)}`),
   deleteFile: (filename) =>
     post(`/api/files/delete?filename=${encodeURIComponent(filename)}`),
+
+  getCameraInfo: () => requestJson("/api/camera"),
 };

@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { Separator } from "@/components/ui/separator";
 import { ControlPanel } from "@/components/control/ControlPanel";
+import { CameraView } from "@/components/dashboard/CameraView";
 import { TemperatureGraph } from "@/components/control/TemperatureGraph";
 import { ConnectionStatus } from "@/components/dashboard/ConnectionStatus";
 import { GcodeDropzone } from "@/components/dashboard/GcodeDropzone";
@@ -199,6 +200,8 @@ export function Dashboard() {
             />
           </CardContent>
         </Card>
+
+        <CameraView />
 
         <Card>
           <CardContent>

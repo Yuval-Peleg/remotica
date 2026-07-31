@@ -8,12 +8,14 @@
  *   1. Parse command-line arguments (currently just an optional
  *      --serial <device> to talk to a real printer instead of the
  *      built-in simulator).
- *   2. Set up the shared PrinterState and load the PrinterProfile.
+ *   2. Set up the shared PrinterState, load the PrinterProfile, and try
+ *      to find/start a webcam (camera.c — entirely optional, absent
+ *      hardware just means no camera stream).
  *   3. Create the printer driver (simulated or real serial) and connect
  *      it.
  *   4. Start civetweb (the HTTP + WebSocket library) and register every
- *      route from api_handlers.c and the WebSocket endpoint from
- *      ws_broadcaster.c.
+ *      route from api_handlers.c, ws_broadcaster.c, console_log.c, and
+ *      camera.c.
  *   5. Start a background thread that "ticks" the driver and job manager
  *      forward and pushes fresh state to every connected browser, over
  *      and over, until the program is told to stop (Ctrl+C).
@@ -35,6 +37,7 @@
 #include <unistd.h>
 
 #include "api_handlers.h"
+#include "camera.h"
 #include "civetweb.h"
 #include "console_log.h"
 #include "job_manager.h"
@@ -131,6 +134,13 @@ int main(int argc, char **argv) {
     ConsoleLog console;
     console_log_init(&console);
 
+    /* Independent of the printer driver entirely — scans for a webcam.
+     * Only a passive check (see camera.h): actually turning the camera
+     * on and capturing frames is deferred until a client first requests
+     * the stream, not done just because the backend started. Safe to
+     * call even if nothing's found. */
+    camera_init();
+
     /* --- 3. Printer driver --- */
 
     PrinterDriver *driver;
@@ -201,7 +211,16 @@ int main(int argc, char **argv) {
 
     mg_init_library(0);
 
-    const char *options[] = {"listening_ports", LISTEN_PORT, "num_threads", "4", NULL};
+    /* num_threads used to be 4, which was plenty when every request was
+     * quick (jog/home/temp) or handed off to civetweb's own websocket
+     * handling (state/console). A camera stream is different: each
+     * connected browser tab ties up one civetweb worker thread for as
+     * long as it stays open (see camera_stream_handler's loop in
+     * camera.c), so a couple of tabs left open with the camera view
+     * visible could otherwise starve every other request — jog/home/
+     * temp included — of a free thread. 8 leaves real headroom for a
+     * few simultaneous camera viewers plus normal API traffic. */
+    const char *options[] = {"listening_ports", LISTEN_PORT, "num_threads", "8", NULL};
 
     struct mg_callbacks callbacks;
     memset(&callbacks, 0, sizeof(callbacks));
@@ -227,6 +246,7 @@ int main(int argc, char **argv) {
     ws_broadcaster_register(ctx, &broadcaster);
 
     console_log_register_routes(ctx, &console);
+    camera_register_routes(ctx);
 
     /* --- 5. Background tick thread --- */
 
@@ -254,10 +274,19 @@ int main(int argc, char **argv) {
     pthread_join(tick_thread, NULL);
 
     /* Order matters here, and it's the reverse of the order things were
-     * started in — every thread that can touch the driver has to be gone
-     * before the driver's connection is torn down.
+     * started in — every thread that can touch the driver (or the
+     * camera) has to be gone before that connection is torn down.
      *
-     * 1. mg_stop() first: until it returns, civetweb's worker threads are
+     * 1. camera_shutdown() first, specifically BEFORE mg_stop(): a
+     *    camera stream's civetweb worker thread loops until the camera
+     *    goes away or the browser disconnects (see camera_stream_
+     *    handler in camera.c) — if mg_stop() ran first, it would block
+     *    waiting for that worker thread to finish, which only happens
+     *    when EITHER of those things occurs, and a browser tab left open
+     *    might never disconnect on its own. Stopping the camera first
+     *    makes that loop notice "the camera is gone" and exit promptly,
+     *    so mg_stop() afterward has nothing indefinite left to wait on.
+     * 2. mg_stop(): until it returns, civetweb's worker threads are
      *    still alive and still serving requests, so a jog/home/temp
      *    request could be sitting inside the driver right now. Closing
      *    the serial fd underneath it would mean writing to a closed
@@ -266,12 +295,13 @@ int main(int argc, char **argv) {
      *    waits for in-flight requests to finish, so this can pause for a
      *    moment if e.g. a home command is still running; that pause is
      *    the point, not a bug.
-     * 2. job_manager_shutdown(): asks any in-progress print streaming
+     * 3. job_manager_shutdown(): asks any in-progress print streaming
      *    thread to stop and blocks until it actually has (it may spend a
      *    couple of seconds sending its heaters-off safety sequence
      *    first — see send_abort_safety_sequence in job_manager.c).
-     * 3. Only now is nothing else using the connection, so it's safe to
+     * 4. Only now is nothing else using the connection, so it's safe to
      *    close. */
+    camera_shutdown();
     mg_stop(ctx);
     job_manager_shutdown();
     driver->disconnect(driver);
