@@ -9,6 +9,7 @@ import { TemperatureGraph } from "@/components/control/TemperatureGraph";
 import { ConnectionStatus } from "@/components/dashboard/ConnectionStatus";
 import { GcodeDropzone } from "@/components/dashboard/GcodeDropzone";
 import { OnDeviceFiles } from "@/components/dashboard/OnDeviceFiles";
+import { GcodeConsole } from "@/components/dashboard/GcodeConsole";
 import { usePrinterState } from "@/hooks/use-printer-state";
 import { useGcodeFile } from "@/hooks/use-gcode-file";
 import { useFilePreview } from "@/hooks/use-file-preview";
@@ -202,6 +203,12 @@ export function Dashboard() {
               hotendTarget={hotend.target}
               bedTarget={bed.target}
             />
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardContent>
+            <GcodeConsole />
           </CardContent>
         </Card>
       </section>

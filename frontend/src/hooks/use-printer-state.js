@@ -29,7 +29,11 @@ export function usePrinterState() {
     const applyStateUpdate = (next) => {
       setState(next);
       setHistory((prev) => {
-        const point = { t: Date.now(), hotend: next.hotend.current, bed: next.bed.current };
+        const point = {
+          t: Date.now(),
+          hotend: next.hotend.current,
+          bed: next.bed.current,
+        };
         const updated = [...prev, point];
         return updated.length > HISTORY_LENGTH
           ? updated.slice(updated.length - HISTORY_LENGTH)

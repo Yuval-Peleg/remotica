@@ -50,6 +50,11 @@ export const api = {
   printResume: () => post("/api/print/resume"),
   printCancel: () => post("/api/print/cancel"),
 
+  getConsoleBacklog: async () => {
+    const { entries } = await requestJson("/api/console");
+    return entries;
+  },
+
   listFiles: () => requestJson("/api/files"),
   getFileContent: async (filename) => {
     const res = await request(
