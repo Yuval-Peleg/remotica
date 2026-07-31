@@ -5,15 +5,19 @@
  * job_manager.h
  * ==============
  * Everything to do with "a gcode file the user wants to print": saving an
- * uploaded file to disk, starting/cancelling a print, and (since there's
- * no real printer streaming yet) faking progress advancing over time.
+ * uploaded file to disk, and starting/pausing/resuming/cancelling a real
+ * print.
  *
  * This is deliberately kept separate from the printer driver
  * (transport.h) — the driver's job is "talk to the printer hardware",
- * this module's job is "manage the print job's lifecycle". A real print
- * would eventually need this module to read the queued gcode file line by
- * line and hand each line to the driver — see job_manager_tick()'s
- * comment for exactly what's NOT implemented yet.
+ * this module's job is "manage the print job's lifecycle". Once a print
+ * starts, job_manager_start_print() launches a dedicated background
+ * thread (see job_manager.c's streamer_thread_main) that reads the queued
+ * gcode file line by line and hands each line to the driver's
+ * send_gcode_line(), tracking real progress as it goes — this runs on its
+ * own thread rather than the shared tick loop specifically so a
+ * multi-hour print doesn't block temperature polling or WebSocket
+ * broadcasts (see main.c).
  *
  * The job's current status/filename/progress live directly on the shared
  * PrinterState (see printer_state.h's PrintJob struct) rather than in a
@@ -24,6 +28,7 @@
 #include <stddef.h>
 
 #include "printer_state.h"
+#include "transport.h"
 
 /* Saves `body` (the raw bytes of an uploaded file, `body_len` bytes long)
  * to disk under `uploads_dir`, using `filename` as the file's name.
@@ -42,15 +47,20 @@
 int job_manager_save_upload(PrinterState *state, const char *uploads_dir, const char *filename,
                             const char *body, size_t body_len);
 
-/* Marks the currently-queued file (state->job.filename) as printing.
- * Returns 0 on success, -1 if there's no file queued (state->job.status
- * isn't JOB_STATUS_READY) or the file doesn't actually exist on disk. */
-int job_manager_start_print(PrinterState *state, const char *uploads_dir);
+/* Marks the currently-queued file (state->job.filename) as printing and
+ * launches the background thread that actually streams it to `driver`
+ * line by line. Returns 0 on success, -1 if there's no file queued
+ * (state->job.status isn't JOB_STATUS_READY), the file doesn't actually
+ * exist on disk, or the thread couldn't be created. */
+int job_manager_start_print(PrinterState *state, PrinterDriver *driver, const char *uploads_dir);
 
 /* Stops printing and fully clears the queued job (status becomes
  * JOB_STATUS_IDLE, filename is cleared, progress resets to 0) — this
  * backend only tracks one job slot at a time, so "cancel" doubles as
- * "clear", matching there being no separate "remove file" endpoint yet. */
+ * "clear", matching there being no separate "remove file" endpoint yet.
+ * If a print streaming thread is currently running, it notices the
+ * cancellation and stops on its own (see streamer_thread_main) — this
+ * function does not block waiting for that to happen. */
 void job_manager_cancel_print(PrinterState *state);
 
 /* Pauses an in-progress print (JOB_STATUS_PRINTING -> JOB_STATUS_PAUSED),
@@ -63,22 +73,14 @@ int job_manager_pause_print(PrinterState *state);
  * currently paused. */
 int job_manager_resume_print(PrinterState *state);
 
-/* Called on every tick (see main.c's background tick loop). If a print is
- * currently in progress, advances its progress by a small fixed amount
- * and marks it complete once it reaches 100%.
- *
- * *** This is a fake progress bar, not a real print. *** A real
- * implementation would read the queued gcode file and send it to the
- * printer driver (see transport.h) one line at a time, using actual
- * progress through the file (bytes sent / total bytes, or line number /
- * total lines) instead of a timer. That's a meaningfully bigger piece of
- * work — it needs to run on its own thread (so a multi-hour print doesn't
- * block the tick loop that also handles temperature polling and
- * WebSocket broadcasts), needs to handle the driver reporting errors
- * mid-print, and needs to support being paused/cancelled cleanly. This
- * function is a placeholder for that, so the REST API and frontend have
- * something real to talk to today. */
-void job_manager_tick(PrinterState *state);
+/* Call once during shutdown (see main.c), before disconnecting the
+ * printer driver. If a print streamer thread is currently running, this
+ * asks it to stop and blocks until it actually has — without this, the
+ * driver could be disconnected (e.g. its serial port closed) while the
+ * streamer thread is still mid-way through sending it a line, which
+ * would be a use-after-close bug. Safe to call even if no print is
+ * running. */
+void job_manager_shutdown(void);
 
 /* ---------------------------------------------------------------------
  * "On device" file management — every gcode file that's ever been

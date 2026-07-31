@@ -442,7 +442,7 @@ static int print_start_handler(struct mg_connection *conn, void *cbdata) {
         return 1;
     }
 
-    if (job_manager_start_print(ctx->state, ctx->uploads_dir) != 0) {
+    if (job_manager_start_print(ctx->state, ctx->driver, ctx->uploads_dir) != 0) {
         mg_send_http_error(conn, 409, "No file ready to print");
         return 1;
     }

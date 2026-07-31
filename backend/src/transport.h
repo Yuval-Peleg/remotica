@@ -81,6 +81,18 @@ typedef struct PrinterDriver {
      * fresh temperature readings. */
     void (*tick)(struct PrinterDriver *self);
 
+    /* Sends one raw gcode line from a queued print file straight to the
+     * printer and blocks until it's acknowledged. Unlike jog/home/
+     * set_target_temp, this doesn't interpret what the line means first —
+     * job_manager.c's print streamer already read it out of a real gcode
+     * file, so this just relays it and reports whether the printer
+     * accepted it. Called from the streamer's own background thread (see
+     * job_manager_start_print), never from the shared tick thread, since
+     * waiting for each line's acknowledgement can take up to a few
+     * seconds on real hardware. Returns 0 on success, -1 on failure (not
+     * connected, write error, or no "ok" within the timeout). */
+    int (*send_gcode_line)(struct PrinterDriver *self, const char *line);
+
     /* Every driver needs somewhere to keep its own private data (e.g. the
      * serial driver needs to remember the file descriptor for the open
      * serial port). Each implementation defines its own small struct for

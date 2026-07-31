@@ -9,8 +9,20 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "console_log.h"
+
+/* This driver's private data. Only used to track two bits of "modal
+ * state" from G90/G91 (absolute vs. relative positioning) and M82/M83
+ * (absolute vs. relative extrusion) — real gcode files toggle these, and
+ * getting them right is needed to make sim_send_gcode_line's position
+ * tracking (see below) actually match what the line means. Both default
+ * to absolute, same as real Marlin firmware's defaults. */
+typedef struct {
+    int relative_position;  /* 0 = absolute (G90), 1 = relative (G91) */
+    int relative_extrusion; /* 0 = absolute (M82), 1 = relative (M83) */
+} SimImplData;
 
 /* How many degrees the simulated temperature moves toward its target on
  * each tick. main.c calls tick() roughly every 300ms, so a hotend step of
@@ -182,6 +194,98 @@ static void sim_tick(PrinterDriver *self) {
     printer_state_unlock(self->state);
 }
 
+/* Looks for `letter` immediately followed by a signed number anywhere in
+ * `line` (e.g. looking for 'X' in "G1 X12.5 Y3 F1200" finds "X12.5" and
+ * writes 12.5 to *out). Keeps searching past false matches — a letter
+ * with no number right after it doesn't count — so this can't be tripped
+ * up by, say, an 'F' inside "F1200" being mistaken for a different
+ * parameter. Returns 1 if found, 0 otherwise. */
+static int parse_gcode_value(const char *line, char letter, double *out) {
+    const char *p = strchr(line, letter);
+    while (p != NULL) {
+        char *end;
+        double value = strtod(p + 1, &end);
+        if (end != p + 1) {
+            *out = value;
+            return 1;
+        }
+        p = strchr(p + 1, letter);
+    }
+    return 0;
+}
+
+/* Interprets just enough of a real gcode line to keep the simulated
+ * position/temperatures moving realistically during a print — this is
+ * NOT a full gcode parser (no arcs, no bed leveling, no multi-extruder
+ * commands), just the handful of commands job_manager.c's print streamer
+ * actually needs simulated feedback for. The real serial driver doesn't
+ * need any of this: it just relays lines to actual hardware, which
+ * interprets them itself. */
+static int sim_send_gcode_line(PrinterDriver *self, const char *line) {
+    SimImplData *impl = (SimImplData *)self->impl_data;
+    log_command(self, line);
+
+    if (strncmp(line, "G90", 3) == 0) {
+        impl->relative_position = 0;
+    } else if (strncmp(line, "G91", 3) == 0) {
+        impl->relative_position = 1;
+    } else if (strncmp(line, "M82", 3) == 0) {
+        impl->relative_extrusion = 0;
+    } else if (strncmp(line, "M83", 3) == 0) {
+        impl->relative_extrusion = 1;
+    } else if (strncmp(line, "G28", 3) == 0) {
+        printer_state_lock(self->state);
+        self->state->position.x_mm = 0.0;
+        self->state->position.y_mm = 0.0;
+        self->state->position.z_mm = 0.0;
+        printer_state_unlock(self->state);
+    } else if (strncmp(line, "G0", 2) == 0 || strncmp(line, "G1", 2) == 0) {
+        double x, y, z, e;
+        int has_x = parse_gcode_value(line, 'X', &x);
+        int has_y = parse_gcode_value(line, 'Y', &y);
+        int has_z = parse_gcode_value(line, 'Z', &z);
+        int has_e = parse_gcode_value(line, 'E', &e);
+
+        printer_state_lock(self->state);
+        if (has_x) {
+            self->state->position.x_mm =
+                impl->relative_position ? self->state->position.x_mm + x : x;
+        }
+        if (has_y) {
+            self->state->position.y_mm =
+                impl->relative_position ? self->state->position.y_mm + y : y;
+        }
+        if (has_z) {
+            self->state->position.z_mm =
+                impl->relative_position ? self->state->position.z_mm + z : z;
+        }
+        if (has_e) {
+            self->state->position.e_mm =
+                impl->relative_extrusion ? self->state->position.e_mm + e : e;
+        }
+        printer_state_unlock(self->state);
+    } else if (strncmp(line, "M104", 4) == 0 || strncmp(line, "M109", 4) == 0) {
+        double s;
+        if (parse_gcode_value(line, 'S', &s)) {
+            printer_state_lock(self->state);
+            self->state->hotend.target_c = s;
+            printer_state_unlock(self->state);
+        }
+    } else if (strncmp(line, "M140", 4) == 0 || strncmp(line, "M190", 4) == 0) {
+        double s;
+        if (parse_gcode_value(line, 'S', &s)) {
+            printer_state_lock(self->state);
+            self->state->bed.target_c = s;
+            printer_state_unlock(self->state);
+        }
+    }
+    /* Anything else (fan speed, retraction settings, etc.) is logged to
+     * the console above but otherwise ignored — it doesn't affect
+     * anything this simulator tracks. */
+
+    return 0;
+}
+
 PrinterDriver *transport_sim_create(PrinterState *state, ConsoleLog *console) {
     PrinterDriver *driver = malloc(sizeof(PrinterDriver));
     if (driver == NULL) {
@@ -189,13 +293,22 @@ PrinterDriver *transport_sim_create(PrinterState *state, ConsoleLog *console) {
                       * struct, but callers should still check for this */
     }
 
+    SimImplData *impl = malloc(sizeof(SimImplData));
+    if (impl == NULL) {
+        free(driver);
+        return NULL;
+    }
+    impl->relative_position = 0;
+    impl->relative_extrusion = 0;
+
     driver->connect = sim_connect;
     driver->disconnect = sim_disconnect;
     driver->jog = sim_jog;
     driver->home = sim_home;
     driver->set_target_temp = sim_set_target_temp;
     driver->tick = sim_tick;
-    driver->impl_data = NULL; /* the simulator has no private data to track */
+    driver->send_gcode_line = sim_send_gcode_line;
+    driver->impl_data = impl;
     driver->state = state;
     driver->console = console;
 
@@ -203,5 +316,6 @@ PrinterDriver *transport_sim_create(PrinterState *state, ConsoleLog *console) {
 }
 
 void transport_sim_destroy(PrinterDriver *driver) {
+    free(driver->impl_data);
     free(driver);
 }

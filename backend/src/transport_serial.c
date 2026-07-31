@@ -441,6 +441,24 @@ static void serial_tick(PrinterDriver *self) {
     }
 }
 
+/* Real hardware doesn't get an optimistic position update the way
+ * jog/home do above — a queued print file can contain thousands of
+ * arbitrary G0/G1 moves in either absolute or relative mode (tracking
+ * that correctly would mean re-implementing a chunk of Marlin's own
+ * modal-state logic), and there's no reliable, firmware-agnostic way to
+ * just ask the printer "where are you now". So position/extruder
+ * readouts in the UI will lag reality during a real print — a known
+ * limitation, not a bug. */
+static int serial_send_gcode_line(PrinterDriver *self, const char *line) {
+    SerialImplData *impl = (SerialImplData *)self->impl_data;
+
+    if (impl->fd < 0) {
+        return -1; /* not connected */
+    }
+
+    return send_and_wait_for_ok(impl->fd, line, TIMEOUT_MS_NORMAL, self->console);
+}
+
 PrinterDriver *transport_serial_create(PrinterState *state, ConsoleLog *console,
                                        const char *device_path) {
     if (strlen(device_path) >= sizeof(((SerialImplData *)0)->device_path)) {
@@ -468,6 +486,7 @@ PrinterDriver *transport_serial_create(PrinterState *state, ConsoleLog *console,
     driver->home = serial_home;
     driver->set_target_temp = serial_set_target_temp;
     driver->tick = serial_tick;
+    driver->send_gcode_line = serial_send_gcode_line;
     driver->impl_data = impl;
     driver->state = state;
     driver->console = console;

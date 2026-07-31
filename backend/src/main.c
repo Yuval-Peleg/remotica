@@ -83,7 +83,6 @@ static void *tick_thread_main(void *arg) {
 
     while (!s_stop_requested) {
         args->driver->tick(args->driver);
-        job_manager_tick(args->state);
         ws_broadcaster_send_state(args->broadcaster, args->state);
 
         usleep(TICK_INTERVAL_MS * 1000);
@@ -209,6 +208,12 @@ int main(int argc, char **argv) {
      * return — pthread_join waits for that to actually happen before we
      * tear anything down out from under it. */
     pthread_join(tick_thread, NULL);
+
+    /* Stop any in-progress print streaming thread before disconnecting
+     * the driver — otherwise it could still be mid-way through sending
+     * that thread a line (e.g. writing to the serial fd) at the exact
+     * moment disconnect() closes it out from under it. */
+    job_manager_shutdown();
 
     driver->disconnect(driver);
     mg_stop(ctx);
