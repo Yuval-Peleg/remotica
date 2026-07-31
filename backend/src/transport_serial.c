@@ -84,20 +84,30 @@ static const struct {
 #define TIMEOUT_MS_HOMING 30000
 #define TIMEOUT_MS_LONG_RUNNING 300000
 
+/* M115 gets its own, longer timeout — measured directly against a real
+ * Ender 3 (Marlin 2.1.2.4): sending M115 to receiving its final "ok"
+ * took ~7.6 SECONDS, not the ~5ms you'd expect for a one-line reply.
+ * Marlin 2.x's M115 reply includes an extended capability report (a
+ * "Cap:" line for every optional feature the firmware was built with —
+ * ~40 of them on this board) on top of the actual FIRMWARE_NAME/
+ * MACHINE_TYPE line this driver actually wants, and composing/sending
+ * all of that apparently isn't instant. TIMEOUT_MS_NORMAL (5s) was cutting
+ * the read off just before "ok" arrived, which is why discovery (and a
+ * real connect, using the same query) reported a real, physically
+ * connected, correctly-responding printer as "not found" — confirmed by
+ * capturing the raw bytes independently of this driver and timing them.
+ * 15s leaves real margin above the ~7.6s actually observed. */
+#define TIMEOUT_MS_FIRMWARE_INFO 15000
+
 /* How long a discovery probe waits for a reply from one candidate device
- * at one candidate baud rate before giving up and moving on. Originally
- * much shorter than this (1.5s) on the theory that a wrong candidate
- * should fail fast — but a real Ender 3 (Creality's stock, heavily
- * modified Marlin fork) took long enough to finish booting that the
- * total probe budget (BOOT_WAIT_SECONDS + this) wasn't enough, and a
- * real, physically-connected printer got treated as "not a printer" and
- * silently skipped. Matching TIMEOUT_MS_NORMAL — the same budget the
- * real connection gets for its own M115 query — trades a slower scan
- * across multiple WRONG candidates for not missing the RIGHT one, and
- * means "discovery found it" reliably implies "a real connect would too."
- * The correct tradeoff either way, since in practice there's usually
- * only one or two candidate devices to try. */
-#define DISCOVERY_PROBE_TIMEOUT_MS TIMEOUT_MS_NORMAL
+ * at one candidate baud rate before giving up and moving on. Tied to
+ * TIMEOUT_MS_FIRMWARE_INFO — the same query, and the same budget, a real
+ * connection gives its own M115 — so "discovery found it" reliably
+ * implies "a real connect would too." A slower scan across multiple
+ * WRONG candidates is the correct tradeoff for not missing the RIGHT
+ * one, especially since in practice there's usually only one or two
+ * candidate devices to try. */
+#define DISCOVERY_PROBE_TIMEOUT_MS TIMEOUT_MS_FIRMWARE_INFO
 
 /* How many times to resend a single line before giving up on it — see
  * send_checksummed_line() below. This driver never has more than one
@@ -494,30 +504,53 @@ static void query_firmware_info(int fd, ConsoleLog *console, char *out, size_t o
     }
 
     struct timespec deadline;
-    deadline_init(&deadline, TIMEOUT_MS_NORMAL);
+    deadline_init(&deadline, TIMEOUT_MS_FIRMWARE_INFO);
 
+    /* Originally this just kept the FIRST non-"ok" reply line, on the
+     * assumption that would be the actual FIRMWARE_NAME:... info line —
+     * true for a simple M115 reply, but a real Ender 3 (Marlin 2.1.2.4)
+     * sends an unrelated "echo:SD card ok" line BEFORE the real M115
+     * response, which got captured instead of anything useful. Now
+     * specifically looks for a line containing "FIRMWARE_NAME:" — the
+     * one thing every Marlin-family M115 reply is expected to include —
+     * and only falls back to the first line seen if no such line ever
+     * turns up, so firmware that formats its reply differently still
+     * gets SOME hint rather than nothing. */
     char reply[256];
+    char first_line[256];
+    first_line[0] = '\0';
+
     while (read_line(fd, reply, sizeof(reply), &deadline, console) >= 0) {
         if (strncmp(reply, "ok", 2) == 0) {
+            if (out[0] == '\0' && first_line[0] != '\0') {
+                snprintf(out, out_size, "%s", first_line);
+            }
             return;
         }
         if (is_error_line(reply)) {
             note_error_line(reply);
         }
-        if (out[0] == '\0') {
-            /* snprintf (not strncpy) specifically because its destination
-             * size is a runtime parameter here, not a compile-time
-             * sizeof(out) the compiler can see — strncpy's silent,
-             * possibly-unterminated truncation is exactly the pattern
-             * -Wstringop-truncation warns about in that situation, even
-             * though it would've been safe here too. */
+        if (first_line[0] == '\0') {
+            snprintf(first_line, sizeof(first_line), "%s", reply);
+        }
+        /* snprintf (not strncpy) specifically because its destination
+         * size is a runtime parameter here, not a compile-time
+         * sizeof(out) the compiler can see — strncpy's silent, possibly-
+         * unterminated truncation is exactly the pattern
+         * -Wstringop-truncation warns about in that situation, even
+         * though it would've been safe here too. */
+        if (out[0] == '\0' && strstr(reply, "FIRMWARE_NAME:") != NULL) {
             snprintf(out, out_size, "%s", reply);
         }
     }
 
-    /* Same reasoning as send_and_wait_for_ok's failure path: we're
+    /* Deadline hit without ever seeing "ok" — same fallback as above, and
+     * same resync reasoning as send_and_wait_for_ok's failure path: we're
      * leaving without having consumed M115's "ok", so drop anything still
      * in flight rather than let it ack somebody else's command later. */
+    if (out[0] == '\0' && first_line[0] != '\0') {
+        snprintf(out, out_size, "%s", first_line);
+    }
     tcflush(fd, TCIFLUSH);
 }
 
