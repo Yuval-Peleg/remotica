@@ -42,7 +42,7 @@ export function Navbar() {
       <nav className="mx-auto flex h-16 max-w-7xl items-center justify-between px-4 sm:px-6 lg:px-8">
         <Link to="/" className="flex items-center gap-2">
           <span className="bg-gradient-to-t from-brand-to to-brand-from bg-clip-text text-2xl font-bold tracking-wide text-transparent">
-            REMOTIKA
+            REMOTICA
           </span>
         </Link>
 
