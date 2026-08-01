@@ -324,8 +324,25 @@ int main(int argc, char **argv) {
      * camera.c), so a couple of tabs left open with the camera view
      * visible could otherwise starve every other request — jog/home/
      * temp included — of a free thread. 8 leaves real headroom for a
-     * few simultaneous camera viewers plus normal API traffic. */
-    const char *options[] = {"listening_ports", listen_port, "num_threads", "8", NULL};
+     * few simultaneous camera viewers plus normal API traffic.
+     *
+     * request_timeout_ms defaults to 30000 (civetweb's default), which
+     * also bounds how long a *write* to a client can block (see push_all/
+     * push_inner in civetweb.c) — including WebSocket broadcasts. Found
+     * live (2026-08-01): ws_broadcaster_send_state() and every
+     * console_log_append() call (which jog/home/temp and every streamed
+     * print line go through — see console_log.c) write to their tracked
+     * clients while holding a shared lock. A single client that's gone
+     * dark without a clean close (phone locked, laptop slept, wifi
+     * roamed — routine on a LAN tool) makes that write block for up to
+     * this timeout, and every other caller wanting the same lock — a
+     * jog button press included — queues up behind it. 3s still gives
+     * genuinely slow-but-working transfers (e.g. a large gcode upload
+     * over weak wifi) room, since the timeout resets on any forward
+     * progress; it just stops a truly dead client from making the whole
+     * app feel stuck for 30+ seconds. */
+    const char *options[] = {"listening_ports",    listen_port, "num_threads", "8",
+                             "request_timeout_ms", "3000",      NULL};
 
     struct mg_callbacks callbacks;
     memset(&callbacks, 0, sizeof(callbacks));
