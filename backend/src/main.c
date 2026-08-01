@@ -11,18 +11,25 @@
  *   2. Set up the shared PrinterState, load the PrinterProfile, and try
  *      to find/start a webcam (camera.c — entirely optional, absent
  *      hardware just means no camera stream).
- *   3. Create the printer driver (simulated or real serial) and connect
- *      it.
+ *   3. Create the printer driver (simulated or real serial) and try to
+ *      connect it. For a real printer, failing to connect here (none
+ *      plugged in yet, wrong port, powered off, ...) is NOT fatal —
+ *      Remotica starts up regardless and a background reconnect thread
+ *      (see reconnect_thread_main below) keeps retrying until one
+ *      answers, so the frontend's connection badge is what tells you
+ *      whether a printer is actually there, not whether the backend is
+ *      running at all.
  *   4. Start civetweb (the HTTP + WebSocket library) and register every
  *      route from api_handlers.c, ws_broadcaster.c, console_log.c, and
  *      camera.c.
  *   5. Start a background thread that "ticks" the driver and job manager
  *      forward and pushes fresh state to every connected browser, over
- *      and over, until the program is told to stop (Ctrl+C).
+ *      and over, until the program is told to stop (Ctrl+C) — and, for a
+ *      real printer, the reconnect thread mentioned above.
  *   6. On shutdown, tear everything down in the reverse of the order it
- *      was started: tick thread, then civetweb, then any running print,
- *      and only then the printer connection itself (see the comment on
- *      that block for why that order specifically).
+ *      was started: tick + reconnect threads, then civetweb, then any
+ *      running print, and only then the printer connection itself (see
+ *      the comment on that block for why that order specifically).
  */
 
 /* See the identical comment in transport_serial.c: -std=c99 hides some
@@ -66,6 +73,15 @@
  * M105 requests. */
 #define TICK_INTERVAL_MS 300
 
+/* How often the reconnect thread retries when using --serial (auto or an
+ * explicit device) and the printer isn't currently connected — whether
+ * that's because none was found yet at startup, or a connect attempt
+ * since then failed. Deliberately much coarser than TICK_INTERVAL_MS: a
+ * connect attempt itself can take several seconds (boot-reset wait, M115
+ * query — see transport_serial.c), so retrying every 300ms would mean
+ * back-to-back attempts with no real gap between them. */
+#define RECONNECT_RETRY_INTERVAL_SECONDS 5
+
 static volatile sig_atomic_t s_stop_requested = 0;
 
 static void handle_stop_signal(int sig_num) {
@@ -91,6 +107,50 @@ static void *tick_thread_main(void *arg) {
         ws_broadcaster_send_state(args->broadcaster, args->state);
 
         usleep(TICK_INTERVAL_MS * 1000);
+    }
+
+    return NULL;
+}
+
+/* ---------------------------------------------------------------------
+ * Reconnect thread (only started when using --serial — the simulator is
+ * always connected, so it never needs this)
+ *
+ * Remotica used to refuse to start at all if a printer wasn't already
+ * plugged in and answering at startup (see the "Not done yet" note this
+ * replaced in the root CLAUDE.md). That meant you couldn't start Remotica
+ * ahead of time and plug the printer in afterward, and the frontend's
+ * connection badge — which already correctly renders "Disconnected" —
+ * never had a real chance to prove it worked, since the backend simply
+ * wouldn't run in that state. Now main() starts the driver in whatever
+ * state connect() leaves it in (connected or not) and this thread keeps
+ * retrying in the background for as long as it isn't connected, so
+ * plugging the printer in (or fixing whatever was wrong — wrong port,
+ * powered off, etc.) any time after startup gets picked up automatically,
+ * with no restart needed.
+ * --------------------------------------------------------------------- */
+
+static void *reconnect_thread_main(void *arg) {
+    PrinterDriver *driver = (PrinterDriver *)arg;
+
+    while (!s_stop_requested) {
+        printer_state_lock(driver->state);
+        int already_connected = driver->state->connected;
+        printer_state_unlock(driver->state);
+
+        if (!already_connected && driver->connect(driver) == 0) {
+            printf("Printer connected.\n");
+            fflush(stdout);
+        }
+
+        /* Slept in short chunks, not one long sleep(), so a shutdown
+         * request is noticed within a fraction of a second instead of
+         * waiting out whatever's left of the retry interval. */
+        for (int waited_ms = 0;
+             waited_ms < RECONNECT_RETRY_INTERVAL_SECONDS * 1000 && !s_stop_requested;
+             waited_ms += 200) {
+            usleep(200 * 1000);
+        }
     }
 
     return NULL;
@@ -165,33 +225,55 @@ int main(int argc, char **argv) {
                              * fprintf(stderr, ...) even though it
                              * happened first — stderr is unbuffered. */
             SerialDiscoveryResult discovered;
-            if (!transport_serial_discover(&console, &discovered)) {
-                fprintf(stderr, "No printer found automatically on /dev/ttyACM* or "
-                                "/dev/ttyUSB*. Plug it in, or pass an explicit --serial "
-                                "<device> instead.\n");
-                return 1;
+            if (transport_serial_discover(&console, &discovered)) {
+                snprintf(discovered_path, sizeof(discovered_path), "%s", discovered.device_path);
+                device_to_use = discovered_path;
+                baud_rate = discovered.baud_rate;
+                discovered_fd = discovered.fd;
+                snprintf(discovered_firmware_info, sizeof(discovered_firmware_info), "%s",
+                         discovered.firmware_info);
+                printf("Found a printer at %s (%ld baud).\n", device_to_use, baud_rate);
+            } else {
+                /* Used to be fatal (return 1) here. Instead, start up
+                 * anyway with no device known yet — see the reconnect
+                 * thread started further down, which re-scans on a timer
+                 * so plugging a printer in later gets picked up without
+                 * a restart. */
+                printf("No printer found automatically on /dev/ttyACM* or /dev/ttyUSB* — "
+                       "starting anyway. Plug one in any time; Remotica will connect "
+                       "automatically (retrying every %ds).\n",
+                       RECONNECT_RETRY_INTERVAL_SECONDS);
             }
-            snprintf(discovered_path, sizeof(discovered_path), "%s", discovered.device_path);
-            device_to_use = discovered_path;
-            baud_rate = discovered.baud_rate;
-            discovered_fd = discovered.fd;
-            snprintf(discovered_firmware_info, sizeof(discovered_firmware_info), "%s",
-                     discovered.firmware_info);
-            printf("Found a printer at %s (%ld baud).\n", device_to_use, baud_rate);
         }
 
-        driver =
-            (discovered_fd >= 0)
-                ? transport_serial_create_from_discovery(&state, &console, device_to_use, baud_rate,
-                                                         discovered_fd, discovered_firmware_info)
-                : transport_serial_create(&state, &console, device_to_use, baud_rate);
-        if (driver == NULL) {
-            fprintf(stderr, "Failed to create serial driver for %s\n", device_to_use);
-            return 1;
+        if (strcmp(serial_device, "auto") == 0 && discovered_fd < 0) {
+            /* --serial auto, nothing found above: no device path exists
+             * yet to create a normal driver for. This driver re-scans on
+             * every connect() attempt instead (see transport_serial_
+             * create_auto()). */
+            driver = transport_serial_create_auto(&state, &console);
+            if (driver == NULL) {
+                fprintf(stderr, "Failed to create serial driver\n");
+                return 1;
+            }
+            printf("Using the REAL serial driver (untested against hardware — see "
+                   "transport_serial.h for details before trusting this with a real "
+                   "printer). No device connected yet.\n");
+        } else {
+            driver = (discovered_fd >= 0)
+                         ? transport_serial_create_from_discovery(&state, &console, device_to_use,
+                                                                  baud_rate, discovered_fd,
+                                                                  discovered_firmware_info)
+                         : transport_serial_create(&state, &console, device_to_use, baud_rate);
+            if (driver == NULL) {
+                fprintf(stderr, "Failed to create serial driver for %s\n", device_to_use);
+                return 1;
+            }
+            printf(
+                "Using the REAL serial driver on %s at %ld baud (untested against hardware —\n"
+                "see transport_serial.h for details before trusting this with a real printer).\n",
+                device_to_use, baud_rate);
         }
-        printf("Using the REAL serial driver on %s at %ld baud (untested against hardware —\n"
-               "see transport_serial.h for details before trusting this with a real printer).\n",
-               device_to_use, baud_rate);
     } else {
         driver = transport_sim_create(&state, &console);
         if (driver == NULL) {
@@ -203,8 +285,19 @@ int main(int argc, char **argv) {
     }
 
     if (driver->connect(driver) != 0) {
-        fprintf(stderr, "Failed to connect to the printer\n");
-        return 1;
+        if (serial_device == NULL) {
+            /* The simulator's connect() never actually fails today, so
+             * this would only trip on a genuine bug in transport_sim.c —
+             * worth treating as fatal rather than silently limping on. */
+            fprintf(stderr, "Failed to connect to the simulated printer\n");
+            return 1;
+        }
+        /* A real printer not being connected/reachable right now is no
+         * longer fatal — see the reconnect thread started below, which
+         * keeps retrying in the background so plugging one in (or fixing
+         * whatever's wrong) after startup is picked up automatically. */
+        printf("Not connected to a printer yet. Remotica is still starting — the frontend's "
+               "connection badge will update automatically once one is found.\n");
     }
 
     /* --- 4. civetweb + routes --- */
@@ -248,11 +341,21 @@ int main(int argc, char **argv) {
     console_log_register_routes(ctx, &console);
     camera_register_routes(ctx);
 
-    /* --- 5. Background tick thread --- */
+    /* --- 5. Background tick thread + (for a real printer) reconnect thread --- */
 
     TickThreadArgs tick_args = {.driver = driver, .state = &state, .broadcaster = &broadcaster};
     pthread_t tick_thread;
     pthread_create(&tick_thread, NULL, tick_thread_main, &tick_args);
+
+    /* Only meaningful for the real serial driver — the simulator connects
+     * successfully once at startup and stays that way, so there's nothing
+     * for this thread to ever do for it. */
+    pthread_t reconnect_thread;
+    int reconnect_thread_started = 0;
+    if (serial_device != NULL) {
+        pthread_create(&reconnect_thread, NULL, reconnect_thread_main, driver);
+        reconnect_thread_started = 1;
+    }
 
     printf("Remotica backend listening on http://0.0.0.0:%s\n", LISTEN_PORT);
     printf("REST API under /api/*, live state over WebSocket at /api/ws\n");
@@ -270,8 +373,18 @@ int main(int argc, char **argv) {
     /* s_stop_requested is already set (that's what got us out of the loop
      * above), so the tick thread will see it on its next wake-up and
      * return — pthread_join waits for that to actually happen before we
-     * tear anything down out from under it. */
+     * tear anything down out from under it. Same for the reconnect
+     * thread, if one was started — it also touches the driver (via
+     * connect()), so it has to be gone before anything below it runs too.
+     * Worst case this pauses for however long a connect() attempt that
+     * was already in flight takes to finish (several seconds on real
+     * hardware — see BOOT_WAIT_SECONDS/M115 in transport_serial.c), the
+     * same kind of bounded shutdown pause job_manager_shutdown() further
+     * down already accepts for an in-progress print's safety sequence. */
     pthread_join(tick_thread, NULL);
+    if (reconnect_thread_started) {
+        pthread_join(reconnect_thread, NULL);
+    }
 
     /* Order matters here, and it's the reverse of the order things were
      * started in — every thread that can touch the driver (or the

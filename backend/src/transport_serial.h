@@ -133,4 +133,17 @@ PrinterDriver *transport_serial_create_from_discovery(PrinterState *state,
                                                       const char *device_path, long baud_rate,
                                                       int fd, const char *firmware_info);
 
+/* Creates a driver for `--serial auto` when the initial startup scan
+ * (transport_serial_discover()) found nothing — there's no device path to
+ * store yet. Unlike transport_serial_create(), this driver's connect()
+ * doesn't just try to open a fixed path: every call (the failed one at
+ * startup, and every retry main.c's reconnect loop makes afterward)
+ * re-scans for a device from scratch (see transport_serial_discover()),
+ * so it picks up a printer plugged in after the process already started,
+ * on whatever device path it happens to enumerate as. Once a scan
+ * succeeds, later reconnects (if the printer is ever disconnected again)
+ * keep re-scanning rather than assuming it'll come back on the same
+ * path. */
+PrinterDriver *transport_serial_create_auto(PrinterState *state, struct ConsoleLog *console);
+
 #endif /* REMOTICA_TRANSPORT_SERIAL_H */

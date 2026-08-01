@@ -175,6 +175,17 @@ typedef struct {
      * once by serial_connect() on the "already open" path and otherwise
      * unused. Empty string for a driver created the normal way. */
     char pending_firmware_info[256];
+
+    /* True for a driver created without a fixed device path (--serial
+     * auto with nothing found yet — see transport_serial_create_auto())
+     * or one created from a successful auto-discovery (transport_serial_
+     * create_from_discovery()) — either way, "auto" was requested. When
+     * set, serial_connect() re-scans for a device on every call where fd
+     * is still -1, instead of only ever trying a fixed device_path. This
+     * is what lets main.c's reconnect thread pick up a printer that
+     * wasn't plugged in yet at startup. False for an explicit --serial
+     * <device>, which always retries that exact path and nothing else. */
+    int auto_discover;
 } SerialImplData;
 
 /* ---------------------------------------------------------------------
@@ -754,20 +765,48 @@ static int serial_connect(PrinterDriver *self) {
      * as printer_state_to_json(). */
     char firmware_info[sizeof(((PrinterState *)0)->firmware_info)];
 
-    if (impl->fd >= 0) {
-        /* Created via transport_serial_create_from_discovery(): this fd
-         * is ALREADY open, already past its boot-reset wait, and already
-         * answered an M115 query (that's how transport_serial_discover()
-         * confirmed it was worth connecting to in the first place) — see
-         * impl->pending_firmware_info's comment. Reusing it here, instead
-         * of closing it and opening a fresh connection from scratch,
-         * skips a second DTR-triggered reset and a second multi-second
-         * M115 wait, which is the whole point: it roughly halves how
-         * long --serial auto takes end to end. */
+    /* Local, not impl->fd, until we actually have something to publish —
+     * see the auto_discover branch below for why. Starts at impl->fd:
+     * that's only ever already >= 0 here if this driver was created via
+     * transport_serial_create_from_discovery(), i.e. this is the very
+     * first connect() call after a successful startup scan. */
+    int fd = impl->fd;
+
+    if (fd < 0 && impl->auto_discover) {
+        /* No device known yet — either transport_serial_create_auto()
+         * was used because nothing was found at startup, or a previous
+         * connect() (this one or an earlier reconnect attempt) found
+         * nothing either. (Re)scan now: this is what lets a driver
+         * created before any printer was plugged in pick one up later,
+         * since main.c's reconnect thread just keeps calling connect()
+         * again on a timer. Deliberately done before io_lock is taken —
+         * same as open_and_configure() below — so a concurrent jog/home
+         * request against a still-disconnected driver keeps failing fast
+         * (impl->fd is still -1) instead of blocking for the whole scan. */
+        SerialDiscoveryResult discovered;
+        if (!transport_serial_discover(self->console, &discovered)) {
+            return -1; /* still nothing out there */
+        }
+        snprintf(impl->device_path, sizeof(impl->device_path), "%s", discovered.device_path);
+        impl->baud_rate = discovered.baud_rate;
+        fd = discovered.fd;
+        snprintf(impl->pending_firmware_info, sizeof(impl->pending_firmware_info), "%s",
+                 discovered.firmware_info);
+    }
+
+    if (fd >= 0) {
+        /* Already open and past its boot-reset wait and M115 query —
+         * either pre-opened at construction time via transport_serial_
+         * create_from_discovery(), or just found by the scan right
+         * above. Reusing it here, instead of closing it and opening a
+         * fresh connection from scratch, skips a second DTR-triggered
+         * reset and a second multi-second M115 wait, which is the whole
+         * point: it roughly halves how long --serial auto takes end to
+         * end. */
         snprintf(firmware_info, sizeof(firmware_info), "%s", impl->pending_firmware_info);
         pthread_mutex_lock(&impl->io_lock);
+        impl->fd = fd;
     } else {
-        int fd;
         if (open_and_configure(impl->device_path, impl->baud_rate, &fd) != 0) {
             fprintf(stderr, "Failed to open/configure serial port %s: %s\n", impl->device_path,
                     strerror(errno));
@@ -1131,11 +1170,12 @@ static int serial_send_gcode_line(PrinterDriver *self, const char *line) {
     return result;
 }
 
-/* Shared setup between transport_serial_create() and
- * transport_serial_create_from_discovery() — the two differ only in
- * what impl->fd and impl->pending_firmware_info start as, which each
- * caller sets itself afterward. Returns NULL (having freed anything
- * already allocated) on failure, same as both public functions. */
+/* Shared setup between transport_serial_create(), transport_serial_
+ * create_from_discovery(), and transport_serial_create_auto() — they
+ * differ only in what impl->fd, impl->pending_firmware_info, and
+ * impl->auto_discover start as, which each caller sets itself afterward.
+ * Returns NULL (having freed anything already allocated) on failure,
+ * same as all three public functions. */
 static PrinterDriver *alloc_serial_driver(PrinterState *state, ConsoleLog *console,
                                           const char *device_path, long baud_rate) {
     if (strlen(device_path) >= sizeof(((SerialImplData *)0)->device_path)) {
@@ -1154,6 +1194,7 @@ static PrinterDriver *alloc_serial_driver(PrinterState *state, ConsoleLog *conso
     impl->checksums_enabled = 0; /* real value decided by serial_connect's M110 negotiation */
     impl->next_line_number = 1;
     impl->pending_firmware_info[0] = '\0';
+    impl->auto_discover = 0; /* the two callers that want this override it below */
     pthread_mutex_init(&impl->io_lock, NULL);
 
     PrinterDriver *driver = malloc(sizeof(PrinterDriver));
@@ -1195,6 +1236,21 @@ PrinterDriver *transport_serial_create_from_discovery(PrinterState *state, Conso
     SerialImplData *impl = (SerialImplData *)driver->impl_data;
     impl->fd = fd;
     snprintf(impl->pending_firmware_info, sizeof(impl->pending_firmware_info), "%s", firmware_info);
+    /* Only ever called from the --serial auto path, so if this driver is
+     * ever disconnected and needs to reconnect later, it should re-scan
+     * rather than assume the printer comes back on this exact path. */
+    impl->auto_discover = 1;
+
+    return driver;
+}
+
+PrinterDriver *transport_serial_create_auto(PrinterState *state, ConsoleLog *console) {
+    PrinterDriver *driver = alloc_serial_driver(state, console, "", SERIAL_BAUD_RATE_DEFAULT);
+    if (driver == NULL) {
+        return NULL;
+    }
+
+    ((SerialImplData *)driver->impl_data)->auto_discover = 1;
 
     return driver;
 }
