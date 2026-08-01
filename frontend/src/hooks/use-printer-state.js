@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { toast } from "sonner";
 import { api } from "@/lib/api";
 
 const HISTORY_LENGTH = 200; // backend ticks ~every 300ms, so this is ~60s of history
@@ -79,12 +80,32 @@ export function usePrinterState() {
     };
   }, []);
 
+  // Jog/home/temp all end up driving real motors/heaters — refusing them
+  // client-side while disconnected (rather than letting them hit the
+  // backend and come back as a 502) means an immediate, specific "the
+  // printer is disconnected" message instead of a generic failure, and
+  // one less pointless round trip. A shared `id` makes repeated attempts
+  // (e.g. mashing a jog button) refresh the same toast instead of
+  // stacking up duplicates.
+  const requireConnected = (action) => {
+    if (!state.connected) {
+      toast.error("Printer is disconnected", {
+        id: "printer-disconnected",
+        description: "Connect a printer before trying to control it.",
+      });
+      return Promise.resolve();
+    }
+    return action();
+  };
+
   return {
     ...state,
     history,
-    jog: (axis, deltaMm) => api.jog(axis, deltaMm),
-    home: () => api.home(),
-    setHotendTarget: (celsius) => api.setTemp("hotend", celsius),
-    setBedTarget: (celsius) => api.setTemp("bed", celsius),
+    jog: (axis, deltaMm) => requireConnected(() => api.jog(axis, deltaMm)),
+    home: () => requireConnected(() => api.home()),
+    setHotendTarget: (celsius) =>
+      requireConnected(() => api.setTemp("hotend", celsius)),
+    setBedTarget: (celsius) =>
+      requireConnected(() => api.setTemp("bed", celsius)),
   };
 }

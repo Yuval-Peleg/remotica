@@ -3,6 +3,7 @@ import { Navbar } from "@/components/Navbar";
 import { Dashboard } from "@/pages/Dashboard";
 import { Settings } from "@/pages/Settings";
 import { PlaceholderPage } from "@/pages/Placeholder";
+import { Toaster } from "@/components/ui/sonner";
 
 function App() {
   return (
@@ -16,6 +17,7 @@ function App() {
           <Route path="/about" element={<PlaceholderPage title="About" />} />
         </Routes>
       </div>
+      <Toaster />
     </BrowserRouter>
   );
 }

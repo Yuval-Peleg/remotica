@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { toast } from "sonner";
 import { Pause, Play, Printer, Square } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -134,7 +135,21 @@ export function Dashboard() {
               <Button
                 className="w-full"
                 disabled={job.status !== "ready"}
-                onClick={() => api.printStart().catch(() => {})}
+                onClick={() => {
+                  // job.status can still be "ready" from before a
+                  // disconnect (it's independent of connection state),
+                  // so the button itself doesn't already rule this out —
+                  // check explicitly rather than letting it hit the
+                  // backend and come back as a 502.
+                  if (!connected) {
+                    toast.error("Printer is disconnected", {
+                      id: "printer-disconnected",
+                      description: "Connect a printer before starting a print.",
+                    });
+                    return;
+                  }
+                  api.printStart().catch(() => {});
+                }}
               >
                 <Printer />
                 Print
