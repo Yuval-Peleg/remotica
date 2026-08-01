@@ -103,7 +103,7 @@ export function ControlPanel({
       </div>
 
       {isPrintActive && (
-        <div className="pointer-events-none absolute inset-0 z-10 flex flex-col items-center gap-1 rounded-lg bg-background/40 pt-2 text-center">
+        <div className="pointer-events-none absolute inset-0 z-10 flex flex-col items-center justify-center gap-1 rounded-lg bg-background/40 text-center">
           <Lock className="size-5 text-muted-foreground" />
           <p className="max-w-56 text-xs text-muted-foreground">
             Can&apos;t manually control the printer mid-print
