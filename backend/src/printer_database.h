@@ -31,12 +31,32 @@ typedef struct {
     const char *id;   /* short stable identifier, e.g. "ender3" */
     const char *name; /* display name, e.g. "Creality Ender 3" */
     PrinterProfile profile;
+    /* The exact MACHINE_TYPE value this printer's own firmware has been
+     * confirmed (against its official firmware source, or real hardware)
+     * to report over M115 - e.g. "Ender-3". NULL for every entry we
+     * haven't verified, which is most of them: many printers' firmware
+     * doesn't set this at all, and guessing risks silently applying a
+     * *different* printer's temp/bed limits, which is worse than no
+     * auto-detect. Only add a value here once it's actually confirmed -
+     * see printer_database.c's k_printers table for what's verified so
+     * far and why the rest deliberately aren't. */
+    const char *verified_machine_type;
 } PrinterDatabaseEntry;
 
 /* Returns a pointer to the static, read-only list of known printers, and
  * writes how many entries it has into *out_count. The caller does not
  * own this memory and must not modify or free it. */
 const PrinterDatabaseEntry *printer_database_get(int *out_count);
+
+/* Given a raw firmware_info string (e.g. state->firmware_info), returns a
+ * pointer to the one PrinterDatabaseEntry whose verified_machine_type
+ * exactly matches (case/dash/underscore-insensitive) the string's
+ * MACHINE_TYPE:<value> token, or NULL if there's no match - including
+ * when firmware_info has no MACHINE_TYPE token at all, or the token
+ * doesn't equal any verified entry. Deliberately exact-equality only,
+ * never a substring/fuzzy match: "Ender-3" and "Ender-3 V2" must never be
+ * treated as the same printer just because one contains the other. */
+const PrinterDatabaseEntry *printer_database_match_firmware(const char *firmware_info);
 
 struct cJSON;
 

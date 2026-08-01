@@ -19,6 +19,21 @@
 
 struct cJSON;
 
+/* Whether — and how — this profile's numbers have actually been confirmed
+ * to describe the printer that's really attached, as opposed to just
+ * being plausible-looking hardcoded defaults nobody has looked at yet.
+ * api_handlers.c refuses jog/home/print-start while this is DEFAULT,
+ * since those all physically move or heat something and the defaults
+ * are a guess, not a fact about the attached hardware. */
+typedef enum {
+    PRINTER_PROFILE_SOURCE_DEFAULT, /* never confirmed - still on hardcoded defaults */
+    PRINTER_PROFILE_SOURCE_AUTO,    /* backend matched the firmware's own MACHINE_TYPE
+                                      * reply against printer_database.c - no human
+                                      * involved (see main.c's try_auto_detect_profile) */
+    PRINTER_PROFILE_SOURCE_MANUAL,  /* a human picked a preset or typed values and hit
+                                      * Save in Settings */
+} PrinterProfileSource;
+
 typedef struct {
     double bed_width_mm;
     double bed_depth_mm;
@@ -26,6 +41,10 @@ typedef struct {
     double min_extrude_temp_c;
     double max_hotend_temp_c;
     double max_bed_temp_c;
+    PrinterProfileSource source;
+    char detected_name[64]; /* display name of the matched/chosen printer, e.g.
+                              * "Creality Ender 3 / Ender 3 Pro"; empty if source
+                              * is still DEFAULT */
 } PrinterProfile;
 
 /* Fills in the same numbers the frontend currently hardcodes, so the

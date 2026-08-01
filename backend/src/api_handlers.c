@@ -117,6 +117,17 @@ static int print_is_active(PrinterState *state) {
     return active;
 }
 
+/* True once a human has confirmed the printer's physical profile — either
+ * directly in Settings, or indirectly via a successful firmware
+ * auto-match (see main.c's try_auto_detect_profile). False means the
+ * profile is still on hardcoded defaults, which are a plausible-looking
+ * guess, not a fact about the printer actually attached — sending real
+ * jog/home/print commands against made-up bed/Z limits risks crashing
+ * into a frame those numbers don't actually describe. */
+static int profile_is_configured(const PrinterProfile *profile) {
+    return profile->source != PRINTER_PROFILE_SOURCE_DEFAULT;
+}
+
 /* Reads the "filename" query string parameter (e.g. from
  * "?filename=benchy.gcode") into `out`. Returns 1 on success, or 0 and
  * sends a 400 error itself if it's missing — so callers can just
@@ -181,6 +192,11 @@ static int jog_handler(struct mg_connection *conn, void *cbdata) {
      * legitimate thing to do mid-print. */
     if (print_is_active(ctx->state)) {
         mg_send_http_error(conn, 409, "Cannot jog while a print is in progress");
+        return 1;
+    }
+
+    if (!profile_is_configured(ctx->profile)) {
+        mg_send_http_error(conn, 409, "Cannot jog without a configured printer profile");
         return 1;
     }
 
@@ -292,6 +308,11 @@ static int home_handler(struct mg_connection *conn, void *cbdata) {
         return 1;
     }
 
+    if (!profile_is_configured(ctx->profile)) {
+        mg_send_http_error(conn, 409, "Cannot home without a configured printer profile");
+        return 1;
+    }
+
     if (ctx->driver->home(ctx->driver) != 0) {
         mg_send_http_error(conn, 502, "Driver failed to home");
         return 1;
@@ -390,6 +411,16 @@ static int profile_handler(struct mg_connection *conn, void *cbdata) {
          * changed (see printer_profile_from_json's doc comment). */
         printer_profile_from_json(ctx->profile, json);
         cJSON_Delete(json);
+
+        /* A human just explicitly confirmed this profile via Settings —
+         * always mark it "manual" regardless of what was there before
+         * (even if it was "auto"), and clear detected_name since that
+         * framing only applies to an auto-match, not a human's choice.
+         * Unconditional on purpose: a client can't opt out of this by
+         * sending its own "source" in the body, since this runs after
+         * the merge and overrides whatever from_json may have set. */
+        ctx->profile->source = PRINTER_PROFILE_SOURCE_MANUAL;
+        ctx->profile->detected_name[0] = '\0';
 
         if (printer_profile_save(ctx->profile, ctx->profile_path) != 0) {
             mg_send_http_error(conn, 500, "Failed to save profile to disk");
@@ -515,6 +546,17 @@ static int print_start_handler(struct mg_connection *conn, void *cbdata) {
 
     if (strcmp(req_info->request_method, "POST") != 0) {
         mg_send_http_error(conn, 405, "Use POST");
+        return 1;
+    }
+
+    /* A multi-hour, unattended print is the highest-stakes case for
+     * trusting the profile's numbers — same reasoning as jog/home being
+     * refused below JOB_STATUS_READY, just checked here since
+     * job_manager_start_print() has no existing concept of PrinterProfile
+     * and profile-safety checks already live at this layer elsewhere
+     * (see jog_handler's cold-extrusion check above). */
+    if (!profile_is_configured(ctx->profile)) {
+        mg_send_http_error(conn, 409, "Cannot start a print without a configured printer profile");
         return 1;
     }
 

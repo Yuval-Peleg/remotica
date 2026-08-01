@@ -48,6 +48,7 @@
 #include "civetweb.h"
 #include "console_log.h"
 #include "job_manager.h"
+#include "printer_database.h"
 #include "printer_profile.h"
 #include "printer_state.h"
 #include "transport.h"
@@ -130,8 +131,52 @@ static void *tick_thread_main(void *arg) {
  * with no restart needed.
  * --------------------------------------------------------------------- */
 
+/* Runs once, synchronously, right after a successful driver->connect() —
+ * from both main()'s initial connect and every retry in
+ * reconnect_thread_main() below — so the frontend can never observe
+ * connected:true before this has already run. Only ever does anything if
+ * the profile hasn't been confirmed by a human OR a previous auto-match
+ * yet (source == DEFAULT); once either has happened, this is a permanent
+ * no-op, so it can never silently overwrite a human's Settings choice. */
+static void try_auto_detect_profile(PrinterState *state, PrinterProfile *profile,
+                                    const char *profile_path) {
+    if (profile->source != PRINTER_PROFILE_SOURCE_DEFAULT) {
+        return;
+    }
+
+    printer_state_lock(state);
+    char firmware_info[sizeof(state->firmware_info)];
+    snprintf(firmware_info, sizeof(firmware_info), "%s", state->firmware_info);
+    printer_state_unlock(state);
+
+    const PrinterDatabaseEntry *match = printer_database_match_firmware(firmware_info);
+    if (match == NULL) {
+        printf("Auto-detect: firmware reply didn't match any known printer profile — "
+               "staying unconfigured until a printer is chosen in Settings.\n");
+        fflush(stdout);
+        return;
+    }
+
+    *profile = match->profile;
+    profile->source = PRINTER_PROFILE_SOURCE_AUTO;
+    snprintf(profile->detected_name, sizeof(profile->detected_name), "%s", match->name);
+
+    printer_profile_save(profile, profile_path);
+
+    printf("Auto-detected printer profile: %s (matched firmware's MACHINE_TYPE reply).\n",
+           match->name);
+    fflush(stdout);
+}
+
+typedef struct {
+    PrinterDriver *driver;
+    PrinterProfile *profile;
+    const char *profile_path;
+} ReconnectThreadArgs;
+
 static void *reconnect_thread_main(void *arg) {
-    PrinterDriver *driver = (PrinterDriver *)arg;
+    ReconnectThreadArgs *args = (ReconnectThreadArgs *)arg;
+    PrinterDriver *driver = args->driver;
 
     while (!s_stop_requested) {
         printer_state_lock(driver->state);
@@ -141,6 +186,7 @@ static void *reconnect_thread_main(void *arg) {
         if (!already_connected && driver->connect(driver) == 0) {
             printf("Printer connected.\n");
             fflush(stdout);
+            try_auto_detect_profile(driver->state, args->profile, args->profile_path);
         }
 
         /* Slept in short chunks, not one long sleep(), so a shutdown
@@ -296,7 +342,9 @@ int main(int argc, char **argv) {
                "printer instead).\n");
     }
 
-    if (driver->connect(driver) != 0) {
+    if (driver->connect(driver) == 0) {
+        try_auto_detect_profile(&state, &profile, PROFILE_PATH);
+    } else {
         if (serial_device == NULL) {
             /* The simulator's connect() never actually fails today, so
              * this would only trip on a genuine bug in transport_sim.c —
@@ -381,8 +429,10 @@ int main(int argc, char **argv) {
      * for this thread to ever do for it. */
     pthread_t reconnect_thread;
     int reconnect_thread_started = 0;
+    ReconnectThreadArgs reconnect_args = {
+        .driver = driver, .profile = &profile, .profile_path = PROFILE_PATH};
     if (serial_device != NULL) {
-        pthread_create(&reconnect_thread, NULL, reconnect_thread_main, driver);
+        pthread_create(&reconnect_thread, NULL, reconnect_thread_main, &reconnect_args);
         reconnect_thread_started = 1;
     }
 

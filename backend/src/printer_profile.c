@@ -28,6 +28,40 @@ void printer_profile_defaults(PrinterProfile *profile) {
      * actually edits these in the Settings page. */
     profile->max_hotend_temp_c = 280.0;
     profile->max_bed_temp_c = 120.0;
+
+    profile->source = PRINTER_PROFILE_SOURCE_DEFAULT;
+    profile->detected_name[0] = '\0';
+}
+
+static const char *profile_source_to_string(PrinterProfileSource source) {
+    switch (source) {
+    case PRINTER_PROFILE_SOURCE_AUTO:
+        return "auto";
+    case PRINTER_PROFILE_SOURCE_MANUAL:
+        return "manual";
+    default:
+        return "default";
+    }
+}
+
+/* Returns 1 and writes *out if str is a recognized value, else 0 and leaves
+ * *out untouched - same "only overwrite on a valid value" contract as
+ * read_number_field() below, so an unrecognized string in profile.json
+ * doesn't silently corrupt the field. */
+static int profile_source_from_string(const char *str, PrinterProfileSource *out) {
+    if (strcmp(str, "auto") == 0) {
+        *out = PRINTER_PROFILE_SOURCE_AUTO;
+        return 1;
+    }
+    if (strcmp(str, "manual") == 0) {
+        *out = PRINTER_PROFILE_SOURCE_MANUAL;
+        return 1;
+    }
+    if (strcmp(str, "default") == 0) {
+        *out = PRINTER_PROFILE_SOURCE_DEFAULT;
+        return 1;
+    }
+    return 0;
 }
 
 /* Small helper: given a JSON object and a field name, if that field
@@ -39,6 +73,18 @@ static int read_number_field(const cJSON *json, const char *field_name, double *
     cJSON *item = cJSON_GetObjectItemCaseSensitive(json, field_name);
     if (item != NULL && cJSON_IsNumber(item)) {
         *out = item->valuedouble;
+        return 1;
+    }
+    return 0;
+}
+
+/* Same "only overwrite on a valid value" contract as read_number_field(),
+ * for a fixed-size char buffer field. */
+static int read_string_field(const cJSON *json, const char *field_name, char *out,
+                             size_t out_size) {
+    cJSON *item = cJSON_GetObjectItemCaseSensitive(json, field_name);
+    if (item != NULL && cJSON_IsString(item)) {
+        snprintf(out, out_size, "%s", item->valuestring);
         return 1;
     }
     return 0;
@@ -58,6 +104,12 @@ int printer_profile_from_json(PrinterProfile *profile, const cJSON *json) {
     read_number_field(json, "maxHotendTempC", &profile->max_hotend_temp_c);
     read_number_field(json, "maxBedTempC", &profile->max_bed_temp_c);
 
+    cJSON *source_item = cJSON_GetObjectItemCaseSensitive(json, "source");
+    if (source_item != NULL && cJSON_IsString(source_item)) {
+        profile_source_from_string(source_item->valuestring, &profile->source);
+    }
+    read_string_field(json, "detectedName", profile->detected_name, sizeof(profile->detected_name));
+
     return 0;
 }
 
@@ -74,6 +126,9 @@ cJSON *printer_profile_to_json(const PrinterProfile *profile) {
     cJSON_AddNumberToObject(root, "minExtrudeTempC", profile->min_extrude_temp_c);
     cJSON_AddNumberToObject(root, "maxHotendTempC", profile->max_hotend_temp_c);
     cJSON_AddNumberToObject(root, "maxBedTempC", profile->max_bed_temp_c);
+
+    cJSON_AddStringToObject(root, "source", profile_source_to_string(profile->source));
+    cJSON_AddStringToObject(root, "detectedName", profile->detected_name);
 
     return root;
 }
@@ -103,6 +158,21 @@ void printer_profile_load(PrinterProfile *profile, const char *path) {
     cJSON *json = cJSON_Parse(buffer);
     if (json != NULL) {
         printer_profile_from_json(profile, json);
+
+        /* Migration: printer_profile_save() had exactly one call site
+         * before the "source" field existed (Settings' Save button), so
+         * any profile.json that exists on disk and predates "source" was
+         * necessarily written by a human, not left over from defaults.
+         * Without this, upgrading would suddenly treat someone's
+         * already-configured printer as unconfigured and lock the
+         * control panel until they re-save. Backfilled once here and
+         * re-saved so every later load reads it directly. */
+        if (!cJSON_HasObjectItem(json, "source") &&
+            profile->source == PRINTER_PROFILE_SOURCE_DEFAULT) {
+            profile->source = PRINTER_PROFILE_SOURCE_MANUAL;
+            printer_profile_save(profile, path);
+        }
+
         cJSON_Delete(json);
     }
     /* If parsing failed, we just keep the defaults set above — a
