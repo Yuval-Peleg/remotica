@@ -84,6 +84,18 @@ static const struct {
 #define TIMEOUT_MS_HOMING 30000
 #define TIMEOUT_MS_LONG_RUNNING 300000
 
+/* The absolute ceiling on how long ONE command's wait can be stretched
+ * by busy-keepalives (see is_busy_line() and the deadline helpers
+ * below). Without a ceiling, "reset the deadline every time the printer
+ * says it's still working" is an unbounded wait by construction, and an
+ * unbounded wait here is exactly what the Deadlines comment block warns
+ * about: it would hang job_manager_shutdown()'s pthread_join and leave
+ * even Ctrl+C unable to stop the backend. 30 minutes is far past any
+ * plausible single command (the longest realistic one, a full G29 mesh
+ * probe on a large bed, is minutes) while still guaranteeing the wait
+ * terminates. */
+#define TIMEOUT_MS_BUSY_CAP 1800000
+
 /* M115 gets its own, longer timeout — measured directly against a real
  * Ender 3 (Marlin 2.1.2.4): sending M115 to receiving its final "ok"
  * took ~7.6 SECONDS, not the ~5ms you'd expect for a one-line reply.
@@ -168,6 +180,13 @@ typedef struct {
     int checksums_enabled; /* did the printer accept our M110 N0 at connect? */
     long next_line_number; /* the N value the next checksummed line will use */
 
+    /* Set when a checksummed line failed without a confirmed "ok", which
+     * leaves next_line_number pointing at a number the firmware may
+     * already have seen. The next send re-negotiates M110 before sending
+     * anything — see resync_line_numbers() for the (safety-relevant)
+     * reason this can't just be ignored. */
+    int needs_line_number_resync;
+
     /* If this driver was created via transport_serial_create_from_
      * discovery(), `fd` already holds an open, booted, past-its-M115-
      * query connection at creation time (instead of the usual -1), and
@@ -231,6 +250,37 @@ static int deadline_remaining_ms(const struct timespec *deadline) {
     return (int)remaining;
 }
 
+/* True if `a` falls strictly later than `b`. */
+static int deadline_is_after(const struct timespec *a, const struct timespec *b) {
+    if (a->tv_sec != b->tv_sec) {
+        return a->tv_sec > b->tv_sec;
+    }
+    return a->tv_nsec > b->tv_nsec;
+}
+
+/* Restarts `deadline` at timeout_ms from NOW — but never past `cap`.
+ *
+ * This is the one deliberate exception to "computed once, up front"
+ * above, and it exists for exactly one reason: a busy-keepalive (see
+ * is_busy_line) is not chatter, it's the firmware explicitly telling us
+ * "I am still executing the command you sent, do not give up on me". A
+ * command that is still legitimately running has not consumed its
+ * allowance in any meaningful sense, so it gets it back.
+ *
+ * Note this is NOT the same case as M115's capability dump, which the
+ * comment above is written about: that's a bounded, known-length burst
+ * of reply lines with a single "ok" at the end, so a shared budget is
+ * the right model for it. A keepalive carries new information (progress
+ * is being made) that a "Cap:" line does not. Resetting on it is also
+ * what other RepRap hosts do — OctoPrint and Printrun both treat a busy
+ * line as a reason to keep waiting rather than as an idle tick. `cap`
+ * is what keeps this bounded regardless; see TIMEOUT_MS_BUSY_CAP. */
+static void deadline_extend(struct timespec *deadline, int timeout_ms, const struct timespec *cap) {
+    struct timespec extended;
+    deadline_init(&extended, timeout_ms);
+    *deadline = deadline_is_after(&extended, cap) ? *cap : extended;
+}
+
 /* ---------------------------------------------------------------------
  * Low-level line I/O
  * --------------------------------------------------------------------- */
@@ -250,6 +300,40 @@ static int is_error_line(const char *line) {
 
 static void note_error_line(const char *line) {
     fprintf(stderr, "Printer reported an error: %s\n", line);
+}
+
+/* True if `line` is Marlin's host-keepalive "I'm still working on the
+ * last command" notice. Marlin emits "echo:busy: processing" roughly
+ * every 2 seconds (HOST_KEEPALIVE_FEATURE, on by default) for as long as
+ * a command is still executing — it's the firmware's own mechanism for
+ * telling a host not to time out on it. The wait loops below reset their
+ * deadline when they see one, via deadline_extend().
+ *
+ * Why this matters concretely (found against a real Ender 3, 2026-08-01):
+ * an ordinary G0/G1 travel move right after G28 took just over 5s, past
+ * TIMEOUT_MS_NORMAL, so a perfectly healthy printer that was busy-
+ * keepaliving the whole time got treated as a driver failure and the
+ * whole print was aborted after essentially one move.
+ *
+ * Matched with a plain case-sensitive prefix compare, same as
+ * is_error_line above — Marlin prefixes host-facing notices with
+ * "echo:", but the bare "busy:" spelling is accepted too since not every
+ * fork/RepRap-family firmware includes the echo prefix.
+ *
+ * ONLY "processing" counts, deliberately. Marlin's other busy states are
+ * "paused for user" and "paused for input" (M0/M1, M600 filament change,
+ * a "continue?" prompt on the LCD), and those keep repeating for as long
+ * as a HUMAN takes to walk over and press the knob — i.e. potentially
+ * forever. Extending the deadline on those would make an unattended
+ * printer able to block the streamer thread, and with it
+ * job_manager_shutdown(), indefinitely. Those keep the ordinary fixed
+ * timeout for their command (M600 is already in command_timeout_ms's
+ * long-running list). */
+static int is_busy_line(const char *line) {
+    if (strncmp(line, "echo:", 5) == 0) {
+        line += 5;
+    }
+    return strncmp(line, "busy: processing", 16) == 0;
 }
 
 /* Writes `line` followed by a newline to the serial port. write() is
@@ -382,12 +466,21 @@ static int send_and_wait_for_ok(int fd, const char *line, int timeout_ms, Consol
     }
 
     struct timespec deadline;
+    struct timespec busy_cap;
     deadline_init(&deadline, timeout_ms);
+    deadline_init(&busy_cap, TIMEOUT_MS_BUSY_CAP);
 
     char reply[256];
     while (read_line(fd, reply, sizeof(reply), &deadline, console) >= 0) {
         if (strncmp(reply, "ok", 2) == 0) {
             return 0;
+        }
+        if (is_busy_line(reply)) {
+            /* Still executing — give the command its full allowance back
+             * rather than counting the time it spent working against it.
+             * See deadline_extend() and is_busy_line(). */
+            deadline_extend(&deadline, timeout_ms, &busy_cap);
+            continue;
         }
         if (is_error_line(reply)) {
             note_error_line(reply);
@@ -412,6 +505,66 @@ static unsigned char gcode_checksum(const char *s) {
         sum ^= (unsigned char)*s;
     }
     return sum;
+}
+
+/* Re-runs the M110 N0 line-number negotiation mid-connection, so the
+ * next checksummed line starts again from N1. Must be called with
+ * io_lock held (every caller is already inside a send path that holds
+ * it). Returns 0 on success, -1 if the printer didn't acknowledge.
+ *
+ * Why this exists — a real safety bug, found against a real Ender 3
+ * (Marlin 2.1.2.4) on 2026-08-01:
+ *
+ * send_checksummed_line() only advances next_line_number after a
+ * confirmed "ok". That's correct for a resend (the firmware wants the
+ * SAME N again), but it means a line that failed outright leaves N
+ * pointing at a number that was already put on the wire once. Marlin's
+ * line-number protocol treats a repeat of an already-seen N as "you're
+ * re-sending something I already have" and simply re-acks it WITHOUT
+ * re-parsing the new content. So the next command sent — with different
+ * text, but that stale N — gets a cheerful "ok" and is silently thrown
+ * away.
+ *
+ * The command that lands in that slot is not arbitrary. A failed line
+ * makes job_manager.c's streamer abort the print, and the very first
+ * thing it does on abort is send_abort_safety_sequence(): "M104 S0",
+ * "M140 S0", "M107". Those all went out under the stale number and were
+ * all silently swallowed, while this driver reported success. Observed
+ * live: hotend and bed sat at full print temperature for 20+ minutes
+ * after an "aborted" print, with the backend believing it had shut them
+ * down.
+ *
+ * The fix has to be a real resynchronisation, not just "advance N on
+ * failure too": a failed line was never confirmed received at all, so
+ * skipping past its number risks the opposite desync — the firmware
+ * demanding a resend of a number this driver has already moved beyond.
+ * M110 is RepRap's purpose-built answer to exactly this. It states what
+ * N to expect on the NEXT line with no ambiguity about old content, it's
+ * sent unnumbered (so it can't itself be swallowed as a duplicate), and
+ * it's the same negotiation serial_connect() already does once at
+ * connect time.
+ *
+ * Deliberately lazy — triggered from the next send rather than pushed
+ * from job_manager.c. The stale number is a property of this driver's
+ * protocol state, so keeping the repair inside the transport layer means
+ * it protects EVERY later checksummed line: not just the abort-safety
+ * sequence, but also the first line of the next print started on the
+ * same connection, which would otherwise be silently dropped in exactly
+ * the same way. It also keeps PrinterDriver's interface unchanged, so
+ * transport_sim.c needs no matching concept it has no use for. */
+static int resync_line_numbers(int fd, SerialImplData *impl, ConsoleLog *console) {
+    /* Whatever is still sitting in the input buffer belongs to the
+     * exchange that just failed — a late "ok" arriving now must not be
+     * allowed to satisfy the M110 below. */
+    tcflush(fd, TCIFLUSH);
+
+    if (send_and_wait_for_ok(fd, "M110 N0", TIMEOUT_MS_NORMAL, console) != 0) {
+        return -1;
+    }
+
+    impl->next_line_number = 1;
+    impl->needs_line_number_resync = 0;
+    return 0;
 }
 
 /* Sends `line` wrapped as "N<n> <line>*<checksum>" instead of bare, so
@@ -439,9 +592,19 @@ static unsigned char gcode_checksum(const char *s) {
  * jog/home/temp lines on the same connection is fine: Marlin only
  * applies line-number/checksum validation to lines that actually start
  * with "N" — anything else is processed normally regardless of whether
- * checksums were negotiated earlier in the connection. */
+ * checksums were negotiated earlier in the connection.
+ *
+ * If a previous call failed outright (no "ok", no usable "Resend"), the
+ * line numbering is no longer known to agree with the firmware's, so
+ * this re-runs the M110 negotiation before sending anything — see
+ * resync_line_numbers() for why that is a safety issue and not just
+ * tidiness. */
 static int send_checksummed_line(int fd, SerialImplData *impl, const char *line, int timeout_ms,
                                  ConsoleLog *console) {
+    if (impl->needs_line_number_resync && resync_line_numbers(fd, impl, console) != 0) {
+        return -1; /* printer isn't answering at all — nothing to be done */
+    }
+
     for (int attempt = 0; attempt < MAX_RESEND_ATTEMPTS; attempt++) {
         char numbered[330];
         int numbered_len =
@@ -458,11 +621,17 @@ static int send_checksummed_line(int fd, SerialImplData *impl, const char *line,
         }
 
         if (write_line(fd, wrapped, console) != 0) {
+            /* A partial write may have put half a numbered line on the
+             * wire, so the firmware's idea of the sequence is now
+             * anyone's guess. */
+            impl->needs_line_number_resync = 1;
             return -1;
         }
 
         struct timespec deadline;
+        struct timespec busy_cap;
         deadline_init(&deadline, timeout_ms);
+        deadline_init(&busy_cap, TIMEOUT_MS_BUSY_CAP);
 
         int got_ok = 0;
         int got_resend = 0;
@@ -471,6 +640,15 @@ static int send_checksummed_line(int fd, SerialImplData *impl, const char *line,
             if (strncmp(reply, "ok", 2) == 0) {
                 got_ok = 1;
                 break;
+            }
+            if (is_busy_line(reply)) {
+                /* Still executing this line — same reasoning as in
+                 * send_and_wait_for_ok. This is the single most important
+                 * place for it: every line of a real print goes through
+                 * here, and print moves are exactly the commands that
+                 * legitimately outrun TIMEOUT_MS_NORMAL. */
+                deadline_extend(&deadline, timeout_ms, &busy_cap);
+                continue;
             }
             /* Marlin's actual wording is "Resend: N<n>" — checked
              * case-insensitively since not every fork capitalizes it the
@@ -494,13 +672,19 @@ static int send_checksummed_line(int fd, SerialImplData *impl, const char *line,
             continue; /* retry the exact same line and line number */
         }
 
-        /* Neither "ok" nor "Resend" within the deadline — same resync
-         * reasoning as send_and_wait_for_ok's failure path. */
+        /* Neither "ok" nor "Resend" within the deadline — same input-
+         * buffer resync reasoning as send_and_wait_for_ok's failure
+         * path, plus the line-numbering resync below. */
         tcflush(fd, TCIFLUSH);
+        impl->needs_line_number_resync = 1;
         return -1;
     }
 
-    return -1; /* kept getting "Resend" until we ran out of attempts */
+    /* Kept getting "Resend" until we ran out of attempts. The firmware
+     * and this driver clearly don't agree about the sequence, so don't
+     * let the next line assume they do. */
+    impl->needs_line_number_resync = 1;
+    return -1;
 }
 
 /* Sends M115 ("firmware info") and captures the most useful line of
@@ -850,6 +1034,7 @@ static int serial_connect(PrinterDriver *self) {
     impl->checksums_enabled =
         (send_and_wait_for_ok(impl->fd, "M110 N0", TIMEOUT_MS_NORMAL, self->console) == 0);
     impl->next_line_number = 1;
+    impl->needs_line_number_resync = 0; /* just negotiated — numbering is known-good */
 
     pthread_mutex_unlock(&impl->io_lock);
 
@@ -1193,6 +1378,7 @@ static PrinterDriver *alloc_serial_driver(PrinterState *state, ConsoleLog *conso
     impl->ticks_since_poll = 0;
     impl->checksums_enabled = 0; /* real value decided by serial_connect's M110 negotiation */
     impl->next_line_number = 1;
+    impl->needs_line_number_resync = 0;
     impl->pending_firmware_info[0] = '\0';
     impl->auto_discover = 0; /* the two callers that want this override it below */
     pthread_mutex_init(&impl->io_lock, NULL);
