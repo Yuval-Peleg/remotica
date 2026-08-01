@@ -5,11 +5,17 @@
  * PrinterDriver function pointers with "pretend" behavior.
  */
 
+/* -std=c99 hides usleep() unless we ask glibc for its normal feature set
+ * first — same reason job_manager.c and main.c both do this, must come
+ * before any system header is included. */
+#define _DEFAULT_SOURCE
+
 #include "transport_sim.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "console_log.h"
 
@@ -229,9 +235,20 @@ static int parse_gcode_value(const char *line, char letter, double *out) {
  * actually needs simulated feedback for. The real serial driver doesn't
  * need any of this: it just relays lines to actual hardware, which
  * interprets them itself. */
+/* A real printer isn't instant: transmitting a line over serial and
+ * waiting for the firmware's "ok" takes real time (see transport_serial.c),
+ * and a print is thousands of such round-trips. Without some per-line
+ * delay here, a simulated print streams end-to-end in well under a
+ * second — too fast to actually watch progress/time-left/the temp graph
+ * do anything. This runs on job_manager.c's dedicated streamer thread
+ * (see streamer_thread_main), never the shared tick thread, so sleeping
+ * here doesn't stall temperature polling or WebSocket broadcasts. */
+#define SIM_LINE_DELAY_US 15000
+
 static int sim_send_gcode_line(PrinterDriver *self, const char *line) {
     SimImplData *impl = (SimImplData *)self->impl_data;
     log_command(self, line);
+    usleep(SIM_LINE_DELAY_US);
 
     if (strncmp(line, "G90", 3) == 0) {
         impl->relative_position = 0;
