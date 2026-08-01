@@ -1,17 +1,36 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
   <defs>
-    <linearGradient id="brand" x1="0" y1="48" x2="0" y2="0" gradientUnits="userSpaceOnUse">
+    <linearGradient id="brand" x1="0" y1="64" x2="0" y2="0" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#4b5945" />
       <stop offset="1" stop-color="#b2c9ad" />
     </linearGradient>
   </defs>
-  <text
-    x="24"
-    y="36"
-    font-family="'Kumbh Sans', Arial, Helvetica, sans-serif"
-    font-weight="700"
-    font-size="36"
-    text-anchor="middle"
+  <!-- Hand-built monogram (not a traced font glyph) — a stem + rounded
+       bowl + diagonal leg, evenodd fill-rule so the bowl subpath acts
+       as a hole in the same fill. Sized/rounded to stay legible down to
+       a 16px tab icon. -->
+  <path
     fill="url(#brand)"
-  >R</text>
+    fill-rule="evenodd"
+    d="
+      M16,13
+      L44,13
+      C51,13 51,22 50,23
+      C49,29 43,30 34,30
+      L27,29
+      L50,51
+      L38,51
+      L27,41
+      L27,51
+      L16,51
+      Z
+
+      M27,19
+      L40,19
+      C44,19 45,21.5 44,24
+      C44,26.5 41,28 36,28
+      L27,27
+      Z
+    "
+  />
 </svg>
