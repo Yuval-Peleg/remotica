@@ -60,8 +60,10 @@ export function Settings() {
     setSaving(true);
     setError(null);
     try {
+      // Only the known numeric fields — form also carries "source"/
+      // "detectedName" now, which Number() would corrupt into NaN.
       const numericForm = Object.fromEntries(
-        Object.entries(form).map(([key, value]) => [key, Number(value)])
+        FIELDS.map(({ key }) => [key, Number(form[key])])
       );
       const updated = await api.setProfile(numericForm);
       setForm(updated);
@@ -82,9 +84,32 @@ export function Settings() {
         </h1>
         <p className="text-sm text-muted-foreground">
           Your printer&apos;s physical specs — bed size, build height, and safe
-          temperature limits. Nothing here is detected automatically; pick your
-          printer below to quick-fill known values, or enter them by hand.
+          temperature limits.
         </p>
+        {form && (
+          <p className="mt-1 text-sm text-muted-foreground">
+            {form.source === "auto" ? (
+              <>
+                Auto-detected as{" "}
+                <span className="font-medium text-foreground">
+                  {form.detectedName}
+                </span>{" "}
+                from the printer&apos;s own firmware reply. You can override
+                this any time below.
+              </>
+            ) : form.source === "manual" ? (
+              <>
+                Manually configured. Pick a different printer below or edit
+                values, then Save, to update it.
+              </>
+            ) : (
+              <>
+                No printer configured yet. Jogging, homing, and starting a print
+                are blocked until you pick one below or enter specs by hand.
+              </>
+            )}
+          </p>
+        )}
       </div>
 
       <Card>

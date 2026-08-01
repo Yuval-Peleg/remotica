@@ -36,6 +36,12 @@ const DEFAULT_PROFILE = {
   minExtrudeTempC: 170,
   maxHotendTempC: 280,
   maxBedTempC: 120,
+  // Fail-closed: until the real fetch below resolves, we genuinely don't
+  // know if the backend has a configured profile, so ControlPanel should
+  // briefly show the "choose a printer" gate rather than briefly show
+  // live controls.
+  source: "default",
+  detectedName: "",
 };
 
 const JOB_STATUS_LABELS = {
@@ -72,11 +78,15 @@ export function Dashboard() {
 
   const [profile, setProfile] = useState(DEFAULT_PROFILE);
   useEffect(() => {
+    // Re-fires on every reconnect (not just on mount) so a page already
+    // open when the backend finishes an async auto-detect doesn't stay
+    // stuck showing a stale/unconfigured profile.
+    if (!connected) return;
     api
       .getProfile()
       .then(setProfile)
       .catch(() => {});
-  }, []);
+  }, [connected]);
 
   const { error: uploadError, selectFile } = useGcodeFile();
   const { thumbnail, printTimeSeconds } = useFilePreview(job.filename || null);

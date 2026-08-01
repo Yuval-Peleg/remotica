@@ -1,8 +1,15 @@
 import { useState } from "react";
-import { Flame, Lock, Thermometer } from "lucide-react";
+import { Link } from "react-router-dom";
+import {
+  Flame,
+  Lock,
+  Settings as SettingsIcon,
+  Thermometer,
+} from "lucide-react";
 import { BedSchematic } from "@/components/control/BedSchematic";
 import { AxisRail } from "@/components/control/AxisRail";
 import { TempDial } from "@/components/control/TempDial";
+import { Button } from "@/components/ui/button";
 import { TEMP_COLORS } from "@/lib/temp-colors";
 import { cn } from "@/lib/utils";
 
@@ -19,6 +26,7 @@ export function ControlPanel({
 }) {
   const canExtrude = hotend.current >= profile.minExtrudeTempC;
   const isPrintActive = jobStatus === "printing" || jobStatus === "paused";
+  const isProfileConfigured = profile.source && profile.source !== "default";
 
   const [homing, setHoming] = useState(false);
   const handleHome = async () => {
@@ -41,7 +49,8 @@ export function ControlPanel({
       <div
         className={cn(
           "flex flex-col gap-6 lg:flex-row lg:items-center",
-          isPrintActive && "pointer-events-none opacity-70"
+          (isPrintActive || !isProfileConfigured) &&
+            "pointer-events-none opacity-70"
         )}
       >
         <div className="mx-auto w-full max-w-xs lg:mx-0">
@@ -102,13 +111,28 @@ export function ControlPanel({
         </div>
       </div>
 
-      {isPrintActive && (
-        <div className="pointer-events-none absolute inset-0 z-10 flex flex-col items-center justify-center gap-1 rounded-lg bg-background/40 text-center">
+      {!isProfileConfigured ? (
+        <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 rounded-lg bg-background/40 text-center">
           <Lock className="size-5 text-muted-foreground" />
           <p className="max-w-56 text-xs text-muted-foreground">
-            Can&apos;t manually control the printer mid-print
+            Choose your printer in Settings before controlling it
           </p>
+          <Button asChild size="sm" variant="secondary">
+            <Link to="/settings">
+              <SettingsIcon className="size-3.5" />
+              Choose printer
+            </Link>
+          </Button>
         </div>
+      ) : (
+        isPrintActive && (
+          <div className="pointer-events-none absolute inset-0 z-10 flex flex-col items-center justify-center gap-1 rounded-lg bg-background/40 text-center">
+            <Lock className="size-5 text-muted-foreground" />
+            <p className="max-w-56 text-xs text-muted-foreground">
+              Can&apos;t manually control the printer mid-print
+            </p>
+          </div>
+        )
       )}
     </div>
   );
