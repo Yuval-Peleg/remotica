@@ -28,6 +28,16 @@ export function useGcodeConsole() {
   const pendingRef = useRef([]);
   const flushHandleRef = useRef(null);
 
+  // Every entry gets a stable, ever-increasing id the moment it's first
+  // seen here, used as GcodeConsole's list key instead of its array index.
+  // That distinction matters a lot once MAX_ENTRIES starts trimming from
+  // the front: with an index key, every remaining row's index shifts on
+  // each trim, so React can't tell old rows from new ones and re-renders
+  // the entire list every flush. A stable id lets it recognize the rows
+  // it's already rendered and only touch the ones actually new.
+  const nextIdRef = useRef(0);
+  const withId = (entry) => ({ ...entry, id: nextIdRef.current++ });
+
   useEffect(() => {
     let cancelled = false;
     let socket = null;
@@ -47,7 +57,7 @@ export function useGcodeConsole() {
     };
 
     const appendEntry = (entry) => {
-      pendingRef.current.push(entry);
+      pendingRef.current.push(withId(entry));
       if (flushHandleRef.current == null) {
         flushHandleRef.current = requestAnimationFrame(flushPending);
       }
@@ -74,7 +84,7 @@ export function useGcodeConsole() {
     api
       .getConsoleBacklog()
       .then((backlog) => {
-        if (!cancelled) setEntries(backlog.slice(-MAX_ENTRIES));
+        if (!cancelled) setEntries(backlog.slice(-MAX_ENTRIES).map(withId));
       })
       .catch(() => {
         /* The WebSocket connecting below will still show new lines even

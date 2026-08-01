@@ -72,14 +72,17 @@ export function GcodeConsole() {
               No printer communication yet.
             </p>
           ) : (
-            entries.map((entry, index) => {
+            entries.map((entry) => {
               const isSent = entry.direction === "sent";
               const translated = plainEnglish
                 ? translateGcodeLine(entry.text, entry.direction)
                 : null;
 
               return (
-                <div key={index} className="flex gap-2 py-0.5 leading-relaxed">
+                <div
+                  key={entry.id}
+                  className="flex gap-2 py-0.5 leading-relaxed"
+                >
                   <span className="shrink-0 text-muted-foreground/60">
                     {formatTime(entry.timestampMs)}
                   </span>
