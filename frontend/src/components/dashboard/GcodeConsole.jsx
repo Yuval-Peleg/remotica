@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { ArrowDown } from "lucide-react";
 import { useGcodeConsole } from "@/hooks/use-gcode-console";
 import { translateGcodeLine } from "@/lib/gcode-translate";
@@ -16,7 +16,49 @@ function formatTime(timestampMs) {
   return new Date(timestampMs).toLocaleTimeString([], { hour12: false });
 }
 
-export function GcodeConsole() {
+// Memoized per line, and deliberately so. Entry objects are created once in
+// useGcodeConsole and never mutated, so every already-visible line's props
+// are referentially identical on the next render and React can skip it
+// entirely. Without that, appending a single line re-ran this body for all
+// MAX_ENTRIES rows — 500 toLocaleTimeString calls (Intl formatting, the
+// single most expensive thing here) plus 1000 cn()/tailwind-merge calls —
+// which measured ~89ms per render while a print was streaming lines.
+const ConsoleLine = memo(function ConsoleLine({ entry, plainEnglish }) {
+  const isSent = entry.direction === "sent";
+  const translated = plainEnglish
+    ? translateGcodeLine(entry.text, entry.direction)
+    : null;
+
+  return (
+    <div className="flex gap-2 py-0.5 leading-relaxed">
+      <span className="shrink-0 text-muted-foreground/60">
+        {formatTime(entry.timestampMs)}
+      </span>
+      <span
+        className={cn(
+          "shrink-0",
+          isSent ? "text-primary" : "text-muted-foreground"
+        )}
+      >
+        {isSent ? "→" : "←"}
+      </span>
+      <span
+        className={cn(
+          "break-all",
+          isSent ? "text-foreground" : "text-muted-foreground"
+        )}
+      >
+        {translated ?? entry.text}
+      </span>
+    </div>
+  );
+});
+
+// Memoized as a whole too: it takes no props and owns its own data, but it
+// sits inside Dashboard, which re-renders on every ~300ms printer-state
+// tick. Without this, each of those ticks rebuilt the whole line list even
+// when no new console line had arrived at all.
+export const GcodeConsole = memo(function GcodeConsole() {
   const entries = useGcodeConsole();
   const [plainEnglish, setPlainEnglish] = useState(false);
   const [isFollowing, setIsFollowing] = useState(true);
@@ -72,39 +114,13 @@ export function GcodeConsole() {
               No printer communication yet.
             </p>
           ) : (
-            entries.map((entry) => {
-              const isSent = entry.direction === "sent";
-              const translated = plainEnglish
-                ? translateGcodeLine(entry.text, entry.direction)
-                : null;
-
-              return (
-                <div
-                  key={entry.id}
-                  className="flex gap-2 py-0.5 leading-relaxed"
-                >
-                  <span className="shrink-0 text-muted-foreground/60">
-                    {formatTime(entry.timestampMs)}
-                  </span>
-                  <span
-                    className={cn(
-                      "shrink-0",
-                      isSent ? "text-primary" : "text-muted-foreground"
-                    )}
-                  >
-                    {isSent ? "→" : "←"}
-                  </span>
-                  <span
-                    className={cn(
-                      "break-all",
-                      isSent ? "text-foreground" : "text-muted-foreground"
-                    )}
-                  >
-                    {translated ?? entry.text}
-                  </span>
-                </div>
-              );
-            })
+            entries.map((entry) => (
+              <ConsoleLine
+                key={entry.id}
+                entry={entry}
+                plainEnglish={plainEnglish}
+              />
+            ))
           )}
         </div>
 
@@ -121,4 +137,4 @@ export function GcodeConsole() {
       </div>
     </div>
   );
-}
+});
