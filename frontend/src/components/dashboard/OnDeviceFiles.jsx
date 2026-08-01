@@ -12,6 +12,15 @@ function formatBytes(bytes) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+// modifiedAt is a Unix timestamp in seconds (backend's st_mtime), Date
+// wants milliseconds.
+function formatDate(modifiedAtSeconds) {
+  return new Date(modifiedAtSeconds * 1000).toLocaleDateString([], {
+    month: "short",
+    day: "numeric",
+  });
+}
+
 // One row in the list. Its own component (rather than inlined in the map()
 // below) because useFilePreview is a hook — it has to be called once per
 // file, which means once per component instance, not once per render of a
@@ -54,6 +63,7 @@ function FileRow({ file, isSelected, disabled, onSelect, onDelete }) {
             {printTimeSeconds != null
               ? ` · ${formatDurationShort(printTimeSeconds)}`
               : ""}
+            {` · ${formatDate(file.modifiedAt)}`}
           </p>
         </div>
       </button>

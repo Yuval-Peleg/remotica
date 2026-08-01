@@ -41,7 +41,7 @@ export function ControlPanel({
       <div
         className={cn(
           "flex flex-col gap-6 lg:flex-row lg:items-center",
-          isPrintActive && "pointer-events-none opacity-30 blur-[1px]"
+          isPrintActive && "pointer-events-none opacity-70"
         )}
       >
         <div className="mx-auto w-full max-w-xs lg:mx-0">
@@ -103,9 +103,9 @@ export function ControlPanel({
       </div>
 
       {isPrintActive && (
-        <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 rounded-lg bg-background/70 text-center backdrop-blur-sm">
-          <Lock className="size-10 text-muted-foreground" />
-          <p className="max-w-56 text-sm text-muted-foreground">
+        <div className="pointer-events-none absolute inset-x-0 top-0 z-10 flex flex-col items-center gap-1 rounded-lg bg-background/40 py-2 text-center">
+          <Lock className="size-5 text-muted-foreground" />
+          <p className="max-w-56 text-xs text-muted-foreground">
             Can&apos;t manually control the printer mid-print
           </p>
         </div>

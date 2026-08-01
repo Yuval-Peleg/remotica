@@ -1,10 +1,18 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
-import { Pause, Play, Printer, Square } from "lucide-react";
+import { CheckCircle2, Pause, Play, Printer, Square } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { Separator } from "@/components/ui/separator";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { ControlPanel } from "@/components/control/ControlPanel";
 import { CameraView } from "@/components/dashboard/CameraView";
 import { TemperatureGraph } from "@/components/control/TemperatureGraph";
@@ -83,11 +91,30 @@ export function Dashboard() {
   const state = !connected ? "Disconnected" : JOB_STATUS_LABELS[job.status];
 
   const printTime = formatDurationShort(printTimeSeconds);
-  // Time left will be able to come from real progress once printing streams
-  // the actual file instead of the backend's placeholder timer — see the
-  // comment on job_manager_tick() in the backend for why that's not done
-  // yet. Until then this just mirrors the total estimate.
-  const printTimeLeft = printTime;
+  const printTimeLeft = formatDurationShort(
+    printTimeSeconds != null
+      ? Math.max(0, printTimeSeconds * (1 - job.progress / 100))
+      : null
+  );
+
+  // Print-finished popup: fires once per completion, when the job goes
+  // printing -> ready with progress essentially at 100%. A driver failure
+  // also lands on "ready" (see job_manager.c), but leaves progress short of
+  // 100 in all but the last-line edge case, so this doesn't fire for that.
+  const [showFinishedDialog, setShowFinishedDialog] = useState(false);
+  const wasPrintingRef = useRef(false);
+  useEffect(() => {
+    const isPrinting = job.status === "printing" || job.status === "paused";
+    if (
+      wasPrintingRef.current &&
+      !isPrinting &&
+      job.status === "ready" &&
+      job.progress >= 99.9
+    ) {
+      setShowFinishedDialog(true);
+    }
+    wasPrintingRef.current = isPrinting;
+  }, [job.status, job.progress]);
 
   return (
     <main className="mx-auto grid max-w-7xl gap-6 px-4 py-6 sm:px-6 lg:grid-cols-[minmax(0,360px)_1fr] lg:px-8">
@@ -212,11 +239,7 @@ export function Dashboard() {
 
         <Card>
           <CardContent>
-            <TemperatureGraph
-              history={history}
-              hotendTarget={hotend.target}
-              bedTarget={bed.target}
-            />
+            <TemperatureGraph history={history} profile={profile} />
           </CardContent>
         </Card>
 
@@ -226,6 +249,26 @@ export function Dashboard() {
           </CardContent>
         </Card>
       </section>
+
+      <Dialog open={showFinishedDialog} onOpenChange={setShowFinishedDialog}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader className="items-center text-center">
+            <CheckCircle2 className="size-12 text-primary" />
+            <DialogTitle className="text-lg">Print finished</DialogTitle>
+            <DialogDescription>
+              {fileLabel} finished printing.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              className="w-full"
+              onClick={() => setShowFinishedDialog(false)}
+            >
+              OK
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </main>
   );
 }

@@ -1,4 +1,3 @@
-import { useRef, useState } from "react";
 import { TEMP_COLORS } from "@/lib/temp-colors";
 
 const WIDTH = 600;
@@ -8,59 +7,18 @@ const INNER_WIDTH = WIDTH - PAD.left - PAD.right;
 const INNER_HEIGHT = HEIGHT - PAD.top - PAD.bottom;
 const GRID_CELL = 20;
 
-// How many gridlines each axis aims to show. This is a target, not a
-// guarantee — niceStep() below picks the nearest "round" step (1, 2, 5,
-// or 10 times a power of ten) to that target, the same approach charting
-// libraries like D3 use, so lines land on numbers like 5, 10, 25, 50
-// instead of awkward ones like 33.3.
-const Y_AXIS_TARGET_TICKS = 6;
-const X_AXIS_TARGET_TICKS = 6;
+// Fixed axes, deliberately not recomputed from the live data: a panel
+// that keeps rescaling itself while you're trying to read it is harder to
+// read, not easier. The X axis matches use-printer-state.js's
+// HISTORY_LENGTH (~60s of ticks at the backend's ~300ms cadence), so the
+// full axis is always exactly as wide as the history buffer can get.
+const Y_AXIS_TICK_STEP = 50;
+const X_AXIS_MAX_SECONDS = 60;
+const X_AXIS_TICK_STEP = 10;
 
-function niceStep(range, targetCount) {
-  const roughStep = range / targetCount;
-  const magnitude = Math.pow(10, Math.floor(Math.log10(roughStep)));
-  const normalized = roughStep / magnitude; // now somewhere in [1, 10)
-  let niceNormalized;
-  if (normalized < 1.5) niceNormalized = 1;
-  else if (normalized < 3) niceNormalized = 2;
-  else if (normalized < 7) niceNormalized = 5;
-  else niceNormalized = 10;
-  return niceNormalized * magnitude;
-}
-
-// Picks the temperature axis's top value and gridline spacing. A small
-// floor (20, padded to ~23) keeps gridlines at a readable ~5deg apart
-// while everything's near ambient temperature, instead of showing one
-// giant empty 0-300 axis; the same "nice step" logic then scales that
-// spacing up gracefully as temperatures actually climb, rather than
-// cramming in dozens of 5deg lines once a hotend target is 200+.
-function computeYAxis(maxValueInView) {
-  const paddedMax = Math.max(20, maxValueInView * 1.15);
-  const step = niceStep(paddedMax, Y_AXIS_TARGET_TICKS);
-  const axisMax = Math.ceil(paddedMax / step) * step;
-
+function tickRange(max, step) {
   const ticks = [];
-  for (let v = 0; v <= axisMax + 0.001; v += step) {
-    ticks.push(Math.round(v));
-  }
-  return { axisMax, ticks };
-}
-
-// Picks the elapsed-time gridline spacing (in whole seconds — fractional
-// seconds would be a strange thing to label). Unlike the Y axis, this
-// doesn't round the visible span itself up to a "nice" number: the graph
-// always shows exactly the history it has, ticks are just placed at nice
-// points within that fixed span.
-function computeXTicks(totalSeconds) {
-  const step = Math.max(
-    1,
-    Math.round(
-      niceStep(Math.max(totalSeconds, X_AXIS_TARGET_TICKS), X_AXIS_TARGET_TICKS)
-    )
-  );
-
-  const ticks = [];
-  for (let v = 0; v <= totalSeconds + 0.001; v += step) {
+  for (let v = 0; v <= max + 0.001; v += step) {
     ticks.push(Math.round(v));
   }
   return ticks;
@@ -78,32 +36,29 @@ function LegendKey({ color, label }) {
   );
 }
 
-export function TemperatureGraph({ history, hotendTarget, bedTarget }) {
-  const containerRef = useRef(null);
-  const [hoverIndex, setHoverIndex] = useState(null);
-
+export function TemperatureGraph({ history, profile }) {
   const n = history.length;
-  const maxValueInView = Math.max(
-    hotendTarget,
-    bedTarget,
-    ...history.map((p) => p.hotend),
-    ...history.map((p) => p.bed)
-  );
-  const { axisMax: yMax, ticks: yTicks } = computeYAxis(maxValueInView);
 
-  const totalSeconds = n > 1 ? (history[n - 1].t - history[0].t) / 1000 : 0;
-  const xTicks = computeXTicks(totalSeconds);
+  // Axis maxed out at the printer's own physical limits, per profile —
+  // fixed, not driven by whatever the current/target temps happen to be.
+  const yMax = Math.max(profile.maxHotendTempC, profile.maxBedTempC);
+  const yTicks = tickRange(yMax, Y_AXIS_TICK_STEP);
+  const xTicks = tickRange(X_AXIS_MAX_SECONDS, X_AXIS_TICK_STEP);
 
+  // Points are placed by real elapsed time since the oldest sample still
+  // in the history buffer, against the fixed 60s axis above — not spread
+  // evenly across the width by index — so a freshly (re)connected session
+  // fills in from the left instead of stretching a handful of points
+  // across the full width.
+  const startMs = history[0]?.t ?? 0;
   const xAt = (i) =>
-    PAD.left + (n <= 1 ? INNER_WIDTH : (i / (n - 1)) * INNER_WIDTH);
-  const yAt = (v) => PAD.top + INNER_HEIGHT - (v / yMax) * INNER_HEIGHT;
-  // Elapsed seconds are placed proportionally along the same axis the
-  // data uses, which is accurate as long as samples arrive at a roughly
-  // steady rate (they do — see the backend's ~300ms tick) — this keeps
-  // tick labels aligned with the plotted line without needing every
-  // point's exact timestamp for positioning.
+    PAD.left +
+    Math.min(1, (history[i].t - startMs) / 1000 / X_AXIS_MAX_SECONDS) *
+      INNER_WIDTH;
+  const yAt = (v) =>
+    PAD.top + INNER_HEIGHT - (Math.min(v, yMax) / yMax) * INNER_HEIGHT;
   const xAtSeconds = (seconds) =>
-    PAD.left + (totalSeconds <= 0 ? 0 : (seconds / totalSeconds) * INNER_WIDTH);
+    PAD.left + (seconds / X_AXIS_MAX_SECONDS) * INNER_WIDTH;
 
   const hotendPoints = history
     .map((p, i) => `${xAt(i)},${yAt(p.hotend)}`)
@@ -113,18 +68,6 @@ export function TemperatureGraph({ history, hotendTarget, bedTarget }) {
   const lastHotend = history[n - 1]?.hotend ?? 0;
   const lastBed = history[n - 1]?.bed ?? 0;
 
-  const handlePointerMove = (e) => {
-    if (!containerRef.current || n === 0) return;
-    const rect = containerRef.current.getBoundingClientRect();
-    const relX = (e.clientX - rect.left) / rect.width;
-    const vbX = relX * WIDTH;
-    const t = (vbX - PAD.left) / INNER_WIDTH;
-    const idx = Math.round(t * (n - 1));
-    setHoverIndex(Math.min(Math.max(idx, 0), n - 1));
-  };
-
-  const hovered = hoverIndex !== null ? history[hoverIndex] : null;
-
   return (
     <div className="flex flex-col gap-3">
       <div className="flex items-center gap-4 text-xs text-muted-foreground">
@@ -133,11 +76,8 @@ export function TemperatureGraph({ history, hotendTarget, bedTarget }) {
       </div>
 
       <div
-        ref={containerRef}
-        className="relative w-full touch-none"
+        className="relative w-full"
         style={{ aspectRatio: `${WIDTH} / ${HEIGHT}` }}
-        onPointerMove={handlePointerMove}
-        onPointerLeave={() => setHoverIndex(null)}
       >
         <svg viewBox={`0 0 ${WIDTH} ${HEIGHT}`} className="h-full w-full">
           <defs>
@@ -297,70 +237,7 @@ export function TemperatureGraph({ history, hotendTarget, bedTarget }) {
               </text>
             </>
           )}
-
-          {hovered && (
-            <>
-              <line
-                x1={xAt(hoverIndex)}
-                x2={xAt(hoverIndex)}
-                y1={PAD.top}
-                y2={HEIGHT - PAD.bottom}
-                strokeWidth={1}
-                className="stroke-border"
-              />
-              <circle
-                cx={xAt(hoverIndex)}
-                cy={yAt(hovered.bed)}
-                r={4}
-                fill={TEMP_COLORS.bed}
-                className="stroke-card"
-                strokeWidth={2}
-              />
-              <circle
-                cx={xAt(hoverIndex)}
-                cy={yAt(hovered.hotend)}
-                r={4}
-                fill={TEMP_COLORS.hotend}
-                className="stroke-card"
-                strokeWidth={2}
-              />
-            </>
-          )}
         </svg>
-
-        {hovered && (
-          <div
-            className="pointer-events-none absolute top-2 flex -translate-x-1/2 flex-col gap-1 rounded-md border border-border bg-popover px-2.5 py-2 text-xs whitespace-nowrap shadow-md"
-            style={{ left: `${(xAt(hoverIndex) / WIDTH) * 100}%` }}
-          >
-            <span className="text-[10px] text-muted-foreground">
-              {new Date(hovered.t).toLocaleTimeString([], {
-                minute: "2-digit",
-                second: "2-digit",
-              })}
-            </span>
-            <span className="flex items-center gap-1.5">
-              <span
-                className="inline-block h-0.5 w-3 rounded-full"
-                style={{ backgroundColor: TEMP_COLORS.hotend }}
-              />
-              <span className="font-medium text-foreground">
-                {Math.round(hovered.hotend)}&deg;C
-              </span>
-              <span className="text-muted-foreground">Hotend</span>
-            </span>
-            <span className="flex items-center gap-1.5">
-              <span
-                className="inline-block h-0.5 w-3 rounded-full"
-                style={{ backgroundColor: TEMP_COLORS.bed }}
-              />
-              <span className="font-medium text-foreground">
-                {Math.round(hovered.bed)}&deg;C
-              </span>
-              <span className="text-muted-foreground">Bed</span>
-            </span>
-          </div>
-        )}
       </div>
     </div>
   );

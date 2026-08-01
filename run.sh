@@ -4,9 +4,10 @@
 # =======
 # One command to get Remotica fully running for a test session: builds
 # the backend if needed, starts it, starts the frontend dev server,
-# waits for both to actually be reachable, reports whether a printer was
-# found, and opens the dashboard in a browser. Ctrl+C stops everything
-# together.
+# waits for both to actually be reachable, and reports whether a printer
+# was found. Deliberately does NOT open a browser on this machine — the
+# whole point is that you connect from a different device on the LAN, so
+# it just prints the LAN URL instead. Ctrl+C stops everything together.
 #
 # Usage:
 #   ./run.sh          # real printer, auto-detected (--serial auto)
@@ -195,14 +196,6 @@ echo "Remotica is running: $FRONTEND_URL"
 LAN_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 if [[ -n "$LAN_IP" ]]; then
     echo "From other devices on your LAN: http://$LAN_IP:5173"
-fi
-
-if command -v xdg-open >/dev/null 2>&1; then
-    xdg-open "$FRONTEND_URL" >/dev/null 2>&1 &
-elif command -v firefox >/dev/null 2>&1; then
-    firefox "$FRONTEND_URL" >/dev/null 2>&1 &
-else
-    echo "(Couldn't find a way to open a browser automatically — open the URL above yourself.)"
 fi
 
 echo
