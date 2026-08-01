@@ -64,6 +64,20 @@ export const GcodeConsole = memo(function GcodeConsole() {
   const [isFollowing, setIsFollowing] = useState(true);
   const scrollRef = useRef(null);
 
+  // Auto-following writes scrollTop, the browser answers with a scroll
+  // event, and handleScroll then re-set isFollowing to the value it
+  // already held. React's same-value bailout doesn't reliably skip the
+  // render pass while other updates are already pending, so during a print
+  // that roughly doubled this component's render count for no visible
+  // change. This ref is the only writer of isFollowing, so the two cannot
+  // drift apart.
+  const followingRef = useRef(true);
+  const setFollowing = (next) => {
+    if (followingRef.current === next) return;
+    followingRef.current = next;
+    setIsFollowing(next);
+  };
+
   // While following, keep pinned to the newest line as entries arrive.
   // Scrolling up by hand (see handleScroll) turns following off, and new
   // lines then arrive without moving the view — exactly like a terminal
@@ -80,13 +94,13 @@ export const GcodeConsole = memo(function GcodeConsole() {
     const el = scrollRef.current;
     if (!el) return;
     const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-    setIsFollowing(distanceFromBottom < AUTO_SCROLL_THRESHOLD_PX);
+    setFollowing(distanceFromBottom < AUTO_SCROLL_THRESHOLD_PX);
   };
 
   const jumpToLatest = () => {
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-    setIsFollowing(true);
+    setFollowing(true);
   };
 
   return (
