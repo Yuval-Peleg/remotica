@@ -175,7 +175,7 @@ echo "=== Starting frontend ==="
 # keeps running as an orphan after npm is killed. Execing straight into
 # vite (same trick already used for the backend above) means $! IS the
 # real process, so killing FRONTEND_PID in cleanup() actually works.
-(cd "$FRONTEND_DIR" && exec ./node_modules/.bin/vite) >"$FRONTEND_LOG" 2>&1 &
+(cd "$FRONTEND_DIR" && exec ./node_modules/.bin/vite --host) >"$FRONTEND_LOG" 2>&1 &
 FRONTEND_PID=$!
 
 echo "Waiting for the frontend to come up..."
@@ -188,6 +188,14 @@ done
 
 echo
 echo "Remotica is running: $FRONTEND_URL"
+
+# --host above makes Vite bind all interfaces, not just localhost, so
+# other devices on the LAN can reach it too — print that URL so you
+# don't have to go find the machine's own IP by hand.
+LAN_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+if [[ -n "$LAN_IP" ]]; then
+    echo "From other devices on your LAN: http://$LAN_IP:5173"
+fi
 
 if command -v xdg-open >/dev/null 2>&1; then
     xdg-open "$FRONTEND_URL" >/dev/null 2>&1 &
