@@ -173,10 +173,22 @@ int main(int argc, char **argv) {
      * the serial driver being untested against real hardware before you
      * reach for --serial. */
     const char *serial_device = NULL;
+
+    /* --port <n> overrides LISTEN_PORT. Not something a normal run needs
+     * (the frontend's dev proxy and the eventual single-process build
+     * both assume the default), but it lets a second backend — notably
+     * backend/tools/fake_marlin_test.py's fake-firmware harness — run
+     * against a pty without having to stop a real one already serving
+     * the dashboard on 8080. */
+    const char *listen_port = LISTEN_PORT;
+
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--serial") == 0 && i + 1 < argc) {
             serial_device = argv[i + 1];
             i++; /* skip the value we just consumed */
+        } else if (strcmp(argv[i], "--port") == 0 && i + 1 < argc) {
+            listen_port = argv[i + 1];
+            i++;
         }
     }
 
@@ -313,14 +325,14 @@ int main(int argc, char **argv) {
      * visible could otherwise starve every other request — jog/home/
      * temp included — of a free thread. 8 leaves real headroom for a
      * few simultaneous camera viewers plus normal API traffic. */
-    const char *options[] = {"listening_ports", LISTEN_PORT, "num_threads", "8", NULL};
+    const char *options[] = {"listening_ports", listen_port, "num_threads", "8", NULL};
 
     struct mg_callbacks callbacks;
     memset(&callbacks, 0, sizeof(callbacks));
 
     struct mg_context *ctx = mg_start(&callbacks, NULL, options);
     if (ctx == NULL) {
-        fprintf(stderr, "Failed to start server on port %s\n", LISTEN_PORT);
+        fprintf(stderr, "Failed to start server on port %s\n", listen_port);
         driver->disconnect(driver);
         return 1;
     }
@@ -357,7 +369,7 @@ int main(int argc, char **argv) {
         reconnect_thread_started = 1;
     }
 
-    printf("Remotica backend listening on http://0.0.0.0:%s\n", LISTEN_PORT);
+    printf("Remotica backend listening on http://0.0.0.0:%s\n", listen_port);
     printf("REST API under /api/*, live state over WebSocket at /api/ws\n");
     printf("Gcode console: GET /api/console, live at /api/ws/console\n\n");
     fflush(stdout);
