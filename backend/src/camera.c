@@ -511,11 +511,20 @@ static int camera_info_handler(struct mg_connection *conn, void *cbdata) {
     int available = (g_camera.device_path[0] != '\0');
     char name[sizeof(g_camera.name)];
     snprintf(name, sizeof(name), "%s", g_camera.name);
+    /* 0 until capture actually starts, then advances by one on every
+     * captured frame (see capture_thread_main). The frontend polls this
+     * while a stream is open and treats "hasn't changed in a while" as
+     * "the picture looks frozen, not just a still scene" — see
+     * CameraView.jsx. Reading it here doesn't activate anything itself;
+     * it's just whatever the capture thread (if running) has already
+     * written under this same lock. */
+    long frame_seq = g_camera.latest_frame_seq;
     pthread_mutex_unlock(&g_camera.lock);
 
     cJSON *root = cJSON_CreateObject();
     cJSON_AddBoolToObject(root, "available", available);
     cJSON_AddStringToObject(root, "name", name);
+    cJSON_AddNumberToObject(root, "frameSeq", (double)frame_seq);
 
     char *text = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
