@@ -14,6 +14,18 @@ checksum/resend path) still haven't been run against real hardware.** This
 matters most, since a bug here could crash a print or drive a heater/motor
 incorrectly.
 
+A first real print attempt on the same day got far enough to expose two
+bugs and then stopped: a false abort on a legitimately-slow move (busy
+keepalives weren't extending the command deadline) and — the serious one —
+an abort-safety sequence that silently no-op'd, leaving the hotend and bed
+at full temperature for 20+ minutes while the backend reported them shut
+down. Both are fixed and now covered by `backend/tools/fake_marlin_test.py`
+(scenarios C and D), but **the fixes have only been verified against the
+pty harness, not re-run against the physical printer.** A full real print,
+start to finish, is still the outstanding milestone — and specifically
+worth watching: whether the abort-safety sequence actually drops the
+heaters when a print is cancelled from the UI.
+
 ## Camera capture verification
 
 `camera.c`'s device discovery is verified against a real webcam, but the
