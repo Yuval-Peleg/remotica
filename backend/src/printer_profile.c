@@ -30,7 +30,7 @@ void printer_profile_defaults(PrinterProfile *profile) {
     profile->max_bed_temp_c = 120.0;
 
     profile->source = PRINTER_PROFILE_SOURCE_DEFAULT;
-    profile->detected_name[0] = '\0';
+    profile->printer_name[0] = '\0';
 }
 
 static const char *profile_source_to_string(PrinterProfileSource source) {
@@ -108,7 +108,15 @@ int printer_profile_from_json(PrinterProfile *profile, const cJSON *json) {
     if (source_item != NULL && cJSON_IsString(source_item)) {
         profile_source_from_string(source_item->valuestring, &profile->source);
     }
-    read_string_field(json, "detectedName", profile->detected_name, sizeof(profile->detected_name));
+    /* "detectedName" is the field's old name, kept as a read-only fallback
+     * so a profile.json written before the rename still shows its printer
+     * name instead of silently going blank. Only consulted when the
+     * current name isn't present, and never written back out. */
+    if (!read_string_field(json, "printerName", profile->printer_name,
+                           sizeof(profile->printer_name))) {
+        read_string_field(json, "detectedName", profile->printer_name,
+                          sizeof(profile->printer_name));
+    }
 
     return 0;
 }
@@ -128,7 +136,7 @@ cJSON *printer_profile_to_json(const PrinterProfile *profile) {
     cJSON_AddNumberToObject(root, "maxBedTempC", profile->max_bed_temp_c);
 
     cJSON_AddStringToObject(root, "source", profile_source_to_string(profile->source));
-    cJSON_AddStringToObject(root, "detectedName", profile->detected_name);
+    cJSON_AddStringToObject(root, "printerName", profile->printer_name);
 
     return root;
 }

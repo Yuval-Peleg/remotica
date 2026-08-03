@@ -1,13 +1,17 @@
-import { useEffect, useState } from "react";
-import { Check, Info } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { Check, PencilLine, Search, Sparkles } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Separator } from "@/components/ui/separator";
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
+  SelectLabel,
+  SelectSeparator,
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
@@ -24,11 +28,48 @@ const FIELDS = [
   { key: "maxBedTempC", label: "Max bed temp", unit: "°C" },
 ];
 
+const MANUAL_ID = "__manual__";
+
+function formatNumber(value) {
+  return Number(value).toString();
+}
+
+function buildVolume(specs) {
+  return `${formatNumber(specs.bedWidthMm)} × ${formatNumber(specs.bedDepthMm)} × ${formatNumber(specs.maxZMm)} mm`;
+}
+
+function manualFormFrom(specs, name) {
+  const form = { name: name ?? "" };
+  for (const { key } of FIELDS) {
+    form[key] = specs ? String(specs[key]) : "";
+  }
+  return form;
+}
+
+function SpecList({ specs }) {
+  return (
+    <dl className="grid grid-cols-2 gap-x-6 gap-y-3 sm:grid-cols-3">
+      {FIELDS.map(({ key, label, unit }) => (
+        <div key={key} className="flex flex-col gap-0.5">
+          <dt className="text-xs text-muted-foreground">{label}</dt>
+          <dd className="text-sm font-medium tabular-nums text-foreground">
+            {formatNumber(specs[key])}
+            <span className="ml-0.5 text-muted-foreground">{unit}</span>
+          </dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
 export function Settings() {
   const { connected, connectionType, firmwareInfo } = usePrinterState();
 
-  const [form, setForm] = useState(null);
+  const [profile, setProfile] = useState(null);
   const [printers, setPrinters] = useState([]);
+  const [suggestion, setSuggestion] = useState(null);
+  const [selectedId, setSelectedId] = useState("");
+  const [manualForm, setManualForm] = useState(null);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState(null);
@@ -36,7 +77,7 @@ export function Settings() {
   useEffect(() => {
     api
       .getProfile()
-      .then(setForm)
+      .then(setProfile)
       .catch(() => setError("Couldn't load the printer profile."));
     api
       .getPrinterDatabase()
@@ -44,29 +85,82 @@ export function Settings() {
       .catch(() => {});
   }, []);
 
-  const applyPreset = (id) => {
-    const preset = printers.find((p) => p.id === id);
-    if (!preset) return;
-    // eslint-disable-next-line no-unused-vars
-    const { id: _id, name: _name, ...profileFields } = preset;
-    setForm((prev) => ({ ...prev, ...profileFields }));
+  // Re-fetched on every connect/disconnect, since the suggestion is derived
+  // from a firmware reply that only exists while a printer is attached.
+  useEffect(() => {
+    api
+      .getPrinterSuggestion()
+      .then(setSuggestion)
+      .catch(() => {});
+  }, [connected]);
+
+  // Picks the dropdown's starting value once the data it depends on has
+  // arrived. Stops as soon as the user picks anything themselves, so a
+  // suggestion landing late (printer connects while this page is open)
+  // can't overwrite a choice they already made.
+  const userPickedRef = useRef(false);
+  useEffect(() => {
+    if (userPickedRef.current || !profile || printers.length === 0) return;
+
+    if (profile.source === "default") {
+      if (suggestion?.match) setSelectedId(suggestion.match.id);
+      return;
+    }
+
+    const known = printers.find((p) => p.name === profile.printerName);
+    if (known) {
+      setSelectedId(known.id);
+    } else {
+      setSelectedId(MANUAL_ID);
+      setManualForm(manualFormFrom(profile, profile.printerName));
+    }
+  }, [profile, printers, suggestion]);
+
+  const selectedPreset = printers.find((p) => p.id === selectedId) ?? null;
+  const isManual = selectedId === MANUAL_ID;
+  const match = suggestion?.match ?? null;
+
+  const handleSelect = (id) => {
+    userPickedRef.current = true;
+    setError(null);
+    if (id === MANUAL_ID && manualForm === null) {
+      // Carry the currently shown numbers over as a starting point, so
+      // "manual" means "tweak these" rather than "start from an empty form".
+      setManualForm(manualFormFrom(selectedPreset ?? profile, ""));
+    }
+    setSelectedId(id);
   };
 
-  const updateField = (key, value) => {
-    setForm((prev) => ({ ...prev, [key]: value }));
+  const updateManualField = (key, value) => {
+    setManualForm((prev) => ({ ...prev, [key]: value }));
   };
 
   const handleSave = async () => {
+    let payload;
+    if (isManual) {
+      const numbers = {};
+      for (const { key, label } of FIELDS) {
+        const value = Number(manualForm[key]);
+        if (!Number.isFinite(value) || value <= 0) {
+          setError(`${label} needs to be a number greater than zero.`);
+          return;
+        }
+        numbers[key] = value;
+      }
+      payload = { ...numbers, printerName: manualForm.name.trim() };
+    } else if (selectedPreset) {
+      const numbers = Object.fromEntries(
+        FIELDS.map(({ key }) => [key, Number(selectedPreset[key])])
+      );
+      payload = { ...numbers, printerName: selectedPreset.name };
+    } else {
+      return;
+    }
+
     setSaving(true);
     setError(null);
     try {
-      // Only the known numeric fields — form also carries "source"/
-      // "detectedName" now, which Number() would corrupt into NaN.
-      const numericForm = Object.fromEntries(
-        FIELDS.map(({ key }) => [key, Number(form[key])])
-      );
-      const updated = await api.setProfile(numericForm);
-      setForm(updated);
+      setProfile(await api.setProfile(payload));
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
     } catch {
@@ -76,6 +170,12 @@ export function Settings() {
     }
   };
 
+  const inUseLabel = !profile
+    ? null
+    : profile.source === "default"
+      ? "Nothing yet"
+      : profile.printerName || "Custom profile";
+
   return (
     <main className="mx-auto flex max-w-3xl flex-col gap-6 px-4 py-10 sm:px-6 lg:px-8">
       <div>
@@ -83,116 +183,193 @@ export function Settings() {
           Settings
         </h1>
         <p className="text-sm text-muted-foreground">
-          Your printer&apos;s physical specs — bed size, build height, and safe
-          temperature limits.
+          Tell Remotica what printer it&apos;s driving, so it knows how far the
+          bed reaches and how hot it&apos;s allowed to get.
         </p>
-        {form && (
-          <p className="mt-1 text-sm text-muted-foreground">
-            {form.source === "auto" ? (
-              <>
-                Auto-detected as{" "}
-                <span className="font-medium text-foreground">
-                  {form.detectedName}
-                </span>{" "}
-                from the printer&apos;s own firmware reply. You can override
-                this any time below.
-              </>
-            ) : form.source === "manual" ? (
-              <>
-                Manually configured. Pick a different printer below or edit
-                values, then Save, to update it.
-              </>
-            ) : (
-              <>
-                No printer configured yet. Jogging, homing, and starting a print
-                are blocked until you pick one below or enter specs by hand.
-              </>
-            )}
-          </p>
-        )}
       </div>
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Connection</CardTitle>
+          <CardTitle className="text-base">Suggested printer</CardTitle>
         </CardHeader>
-        <CardContent className="flex flex-col gap-3">
+        <CardContent className="flex flex-col gap-4">
           <ConnectionStatus
             connected={connected}
             connectionType={connectionType}
           />
 
-          <Alert>
-            <Info className="size-4" />
-            <AlertDescription>
-              {firmwareInfo ? (
-                <>
-                  Printer replied to a firmware query with:{" "}
-                  <span className="font-mono text-foreground">
-                    {firmwareInfo}
+          {!connected ? (
+            <p className="text-sm text-muted-foreground">
+              No printer connected. Plug one in over USB and Remotica will ask
+              it what it is.
+            </p>
+          ) : match ? (
+            <>
+              <div className="flex items-start gap-3">
+                <Sparkles className="mt-0.5 size-5 shrink-0 text-primary" />
+                <div className="flex flex-col gap-0.5">
+                  <span className="font-heading text-lg leading-tight font-semibold text-foreground">
+                    {match.name}
                   </span>
-                  . This is a hint, not a reliable identification — most
-                  firmwares don&apos;t report a specific model name, so use it
-                  to help you pick a printer below, not as an automatic answer.
-                </>
-              ) : (
-                <>
-                  No firmware info reported yet. Even when a printer does reply,
-                  USB and Wi-Fi connections can&apos;t reliably identify which
-                  specific model is attached — there&apos;s no standard way to
-                  ask. Pick your printer below, or enter its specs manually.
-                </>
+                  <span className="text-xs text-muted-foreground tabular-nums">
+                    {buildVolume(match)} build volume · up to{" "}
+                    {formatNumber(match.maxHotendTempC)}°C hotend,{" "}
+                    {formatNumber(match.maxBedTempC)}°C bed
+                  </span>
+                </div>
+              </div>
+
+              {firmwareInfo && (
+                <div className="rounded-md border border-border bg-background/60 p-2.5">
+                  <p className="text-[0.65rem] font-medium tracking-wide text-muted-foreground uppercase">
+                    What the printer reported
+                  </p>
+                  <p className="mt-1 font-mono text-xs break-all text-foreground">
+                    {firmwareInfo}
+                  </p>
+                </div>
               )}
-            </AlertDescription>
-          </Alert>
+
+              <Separator />
+              <p className="text-sm text-muted-foreground">
+                Remotica thinks this is a{" "}
+                <span className="font-medium text-foreground">
+                  {match.name}
+                </span>
+                , going by the model name in that reply. Check it yourself
+                before you print — the wrong match means the wrong bed size and
+                temperature limits.
+              </p>
+            </>
+          ) : (
+            <>
+              <div className="flex items-start gap-3">
+                <Search className="mt-0.5 size-5 shrink-0 text-muted-foreground" />
+                <div className="flex flex-col gap-0.5">
+                  <span className="font-heading text-lg leading-tight font-semibold text-foreground">
+                    Not recognised
+                  </span>
+                  <span className="text-xs text-muted-foreground">
+                    This printer didn&apos;t report a model name Remotica knows.
+                  </span>
+                </div>
+              </div>
+
+              {firmwareInfo && (
+                <div className="rounded-md border border-border bg-background/60 p-2.5">
+                  <p className="text-[0.65rem] font-medium tracking-wide text-muted-foreground uppercase">
+                    What the printer reported
+                  </p>
+                  <p className="mt-1 font-mono text-xs break-all text-foreground">
+                    {firmwareInfo}
+                  </p>
+                </div>
+              )}
+
+              <Separator />
+              <p className="text-sm text-muted-foreground">
+                Most printers don&apos;t announce their model over USB, so this
+                is normal. Pick yours below, or enter its specs by hand.
+              </p>
+            </>
+          )}
         </CardContent>
       </Card>
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Printer profile</CardTitle>
+          <CardTitle className="text-base">Choose your printer</CardTitle>
         </CardHeader>
         <CardContent className="flex flex-col gap-4">
-          {printers.length > 0 && (
-            <div className="flex flex-col gap-1.5">
-              <label className="text-xs font-medium text-muted-foreground">
-                Quick-fill from a known printer
-              </label>
-              <Select onValueChange={applyPreset}>
-                <SelectTrigger className="w-full">
-                  <SelectValue placeholder="Select a printer model..." />
-                </SelectTrigger>
-                <SelectContent>
-                  {printers.map((printer) => (
-                    <SelectItem key={printer.id} value={printer.id}>
-                      {printer.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
+          {profile?.source === "default" && (
+            <Alert>
+              <AlertDescription>
+                No printer chosen yet. Jogging, homing, and starting a print
+                stay blocked until you save one here.
+              </AlertDescription>
+            </Alert>
           )}
 
-          {form && (
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-              {FIELDS.map(({ key, label, unit }) => (
-                <div key={key} className="flex flex-col gap-1.5">
-                  <label
-                    htmlFor={key}
-                    className="text-xs font-medium text-muted-foreground"
-                  >
-                    {label} ({unit})
-                  </label>
-                  <Input
-                    id={key}
-                    type="number"
-                    value={form[key]}
-                    onChange={(e) => updateField(key, e.target.value)}
-                  />
-                </div>
-              ))}
-            </div>
+          <div className="flex flex-col gap-1.5">
+            <label className="text-xs font-medium text-muted-foreground">
+              Printer
+            </label>
+            <Select value={selectedId} onValueChange={handleSelect}>
+              <SelectTrigger className="w-full">
+                <SelectValue placeholder="Pick a printer..." />
+              </SelectTrigger>
+              <SelectContent>
+                {match && (
+                  <SelectGroup>
+                    <SelectLabel>Suggested</SelectLabel>
+                    <SelectItem value={match.id}>{match.name}</SelectItem>
+                  </SelectGroup>
+                )}
+                {match && <SelectSeparator />}
+                <SelectGroup>
+                  {match && <SelectLabel>Everything else</SelectLabel>}
+                  {printers
+                    .filter((p) => p.id !== match?.id)
+                    .map((printer) => (
+                      <SelectItem key={printer.id} value={printer.id}>
+                        {printer.name}
+                      </SelectItem>
+                    ))}
+                </SelectGroup>
+                <SelectSeparator />
+                <SelectItem value={MANUAL_ID}>
+                  <PencilLine className="size-3.5" />
+                  Enter specs by hand
+                </SelectItem>
+              </SelectContent>
+            </Select>
+            {inUseLabel && (
+              <p className="text-xs text-muted-foreground">
+                In use right now:{" "}
+                <span className="text-foreground">{inUseLabel}</span>
+              </p>
+            )}
+          </div>
+
+          {isManual && manualForm && (
+            <>
+              <div className="flex flex-col gap-1.5">
+                <label
+                  htmlFor="printerName"
+                  className="text-xs font-medium text-muted-foreground"
+                >
+                  Name this printer
+                </label>
+                <Input
+                  id="printerName"
+                  value={manualForm.name}
+                  placeholder="e.g. Ender 3 with the taller frame"
+                  onChange={(e) => updateManualField("name", e.target.value)}
+                />
+              </div>
+
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                {FIELDS.map(({ key, label, unit }) => (
+                  <div key={key} className="flex flex-col gap-1.5">
+                    <label
+                      htmlFor={key}
+                      className="text-xs font-medium text-muted-foreground"
+                    >
+                      {label} ({unit})
+                    </label>
+                    <Input
+                      id={key}
+                      type="number"
+                      value={manualForm[key]}
+                      onChange={(e) => updateManualField(key, e.target.value)}
+                    />
+                  </div>
+                ))}
+              </div>
+            </>
           )}
+
+          {selectedPreset && <SpecList specs={selectedPreset} />}
 
           {error && (
             <Alert variant="destructive">
@@ -200,17 +377,19 @@ export function Settings() {
             </Alert>
           )}
 
-          <div className="flex items-center gap-3">
-            <Button onClick={handleSave} disabled={!form || saving}>
-              {saving ? "Saving..." : "Save"}
-            </Button>
-            {saved && (
-              <span className="flex items-center gap-1 text-sm text-primary">
-                <Check className="size-4" />
-                Saved
-              </span>
-            )}
-          </div>
+          {(selectedPreset || (isManual && manualForm)) && (
+            <div className="flex items-center gap-3">
+              <Button onClick={handleSave} disabled={saving}>
+                {saving ? "Saving..." : "Use this printer"}
+              </Button>
+              {saved && (
+                <span className="flex items-center gap-1 text-sm text-primary">
+                  <Check className="size-4" />
+                  Saved
+                </span>
+              )}
+            </div>
+          )}
         </CardContent>
       </Card>
     </main>

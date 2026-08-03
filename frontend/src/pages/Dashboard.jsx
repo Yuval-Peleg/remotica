@@ -41,7 +41,7 @@ const DEFAULT_PROFILE = {
   // briefly show the "choose a printer" gate rather than briefly show
   // live controls.
   source: "default",
-  detectedName: "",
+  printerName: "",
 };
 
 const JOB_STATUS_LABELS = {

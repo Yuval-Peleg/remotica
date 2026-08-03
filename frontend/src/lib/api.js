@@ -44,6 +44,12 @@ export const api = {
     return printers;
   },
 
+  // What the attached printer's firmware reply suggests it is, computed
+  // fresh on each call — independent of what's actually saved in the
+  // profile. Resolves to { connected, firmwareInfo, match } where match is
+  // a printer-database entry or null.
+  getPrinterSuggestion: () => requestJson("/api/printer-suggestion"),
+
   uploadFile: (file) =>
     requestJson(`/api/upload?filename=${encodeURIComponent(file.name)}`, {
       method: "POST",

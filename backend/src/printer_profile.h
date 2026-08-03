@@ -28,10 +28,10 @@ struct cJSON;
 typedef enum {
     PRINTER_PROFILE_SOURCE_DEFAULT, /* never confirmed - still on hardcoded defaults */
     PRINTER_PROFILE_SOURCE_AUTO,    /* backend matched the firmware's own MACHINE_TYPE
-                                      * reply against printer_database.c - no human
-                                      * involved (see main.c's try_auto_detect_profile) */
+                                     * reply against printer_database.c - no human
+                                     * involved (see main.c's try_auto_detect_profile) */
     PRINTER_PROFILE_SOURCE_MANUAL,  /* a human picked a preset or typed values and hit
-                                      * Save in Settings */
+                                     * Save in Settings */
 } PrinterProfileSource;
 
 typedef struct {
@@ -42,9 +42,14 @@ typedef struct {
     double max_hotend_temp_c;
     double max_bed_temp_c;
     PrinterProfileSource source;
-    char detected_name[64]; /* display name of the matched/chosen printer, e.g.
-                              * "Creality Ender 3 / Ender 3 Pro"; empty if source
-                              * is still DEFAULT */
+    char printer_name[64]; /* display name of whatever printer these numbers
+                            * describe - an auto-matched database entry
+                            * ("Creality Ender 3 / Ender 3 Pro"), a preset the
+                            * user picked, or a name they typed themselves for
+                            * a hand-entered profile. Empty if source is still
+                            * DEFAULT. Serialized as "printerName"; older
+                            * profile.json files call it "detectedName" and are
+                            * still read (see printer_profile_from_json). */
 } PrinterProfile;
 
 /* Fills in the same numbers the frontend currently hardcodes, so the

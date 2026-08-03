@@ -410,17 +410,25 @@ static int profile_handler(struct mg_connection *conn, void *cbdata) {
         /* Partial update: only fields present in the request body are
          * changed (see printer_profile_from_json's doc comment). */
         printer_profile_from_json(ctx->profile, json);
+        int name_supplied = cJSON_HasObjectItem(json, "printerName");
         cJSON_Delete(json);
 
         /* A human just explicitly confirmed this profile via Settings —
          * always mark it "manual" regardless of what was there before
-         * (even if it was "auto"), and clear detected_name since that
-         * framing only applies to an auto-match, not a human's choice.
-         * Unconditional on purpose: a client can't opt out of this by
-         * sending its own "source" in the body, since this runs after
-         * the merge and overrides whatever from_json may have set. */
+         * (even if it was "auto"). Unconditional on purpose: a client
+         * can't opt out of this by sending its own "source" in the body,
+         * since this runs after the merge and overrides whatever
+         * from_json may have set.
+         *
+         * The name is only kept when the client actually sent one (the
+         * preset it picked, or a name typed for a hand-entered profile).
+         * A save with no name clears it rather than leaving a previous
+         * auto-detected model name attached to numbers it no longer
+         * describes. */
         ctx->profile->source = PRINTER_PROFILE_SOURCE_MANUAL;
-        ctx->profile->detected_name[0] = '\0';
+        if (!name_supplied) {
+            ctx->profile->printer_name[0] = '\0';
+        }
 
         if (printer_profile_save(ctx->profile, ctx->profile_path) != 0) {
             mg_send_http_error(conn, 500, "Failed to save profile to disk");
@@ -450,6 +458,54 @@ static int printer_database_handler(struct mg_connection *conn, void *cbdata) {
 
     cJSON *root = cJSON_CreateObject();
     cJSON_AddItemToObject(root, "printers", printer_database_to_json());
+    send_json_and_delete(conn, root);
+    return 1;
+}
+
+/* ---------------------------------------------------------------------
+ * GET /api/printer-suggestion
+ * --------------------------------------------------------------------- */
+
+/* What the currently-attached printer's own firmware reply suggests it is,
+ * computed fresh on every request. Deliberately separate from the profile:
+ * main.c's auto-detect only ever writes a match into the profile when
+ * nothing has been configured yet, so once a human has saved anything the
+ * profile stops reflecting what the hardware is reporting. Settings needs
+ * both — "here's what Remotica thinks is plugged in" alongside "here's
+ * what's actually configured" — so this reports the raw suggestion
+ * regardless of what's saved, and changes nothing. */
+static int printer_suggestion_handler(struct mg_connection *conn, void *cbdata) {
+    AppContext *ctx = (AppContext *)cbdata;
+    const struct mg_request_info *req_info = mg_get_request_info(conn);
+
+    if (strcmp(req_info->request_method, "GET") != 0) {
+        mg_send_http_error(conn, 405, "Use GET");
+        return 1;
+    }
+
+    printer_state_lock(ctx->state);
+    int connected = ctx->state->connected;
+    char firmware_info[sizeof(ctx->state->firmware_info)];
+    snprintf(firmware_info, sizeof(firmware_info), "%s", ctx->state->firmware_info);
+    printer_state_unlock(ctx->state);
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "connected", connected);
+    cJSON_AddStringToObject(root, "firmwareInfo", firmware_info);
+
+    const PrinterDatabaseEntry *match = printer_database_match_firmware(firmware_info);
+    if (match == NULL) {
+        cJSON_AddNullToObject(root, "match");
+    } else {
+        /* Same shape as one entry of GET /api/printer-database, so the
+         * frontend can hand it to the same "apply this preset" code path
+         * with no special-casing. */
+        cJSON *item = printer_profile_to_json(&match->profile);
+        cJSON_AddStringToObject(item, "id", match->id);
+        cJSON_AddStringToObject(item, "name", match->name);
+        cJSON_AddItemToObject(root, "match", item);
+    }
+
     send_json_and_delete(conn, root);
     return 1;
 }
@@ -764,6 +820,7 @@ void api_handlers_register_all(struct mg_context *ctx, AppContext *app_context) 
     mg_set_request_handler(ctx, "/api/temp", temp_handler, app_context);
     mg_set_request_handler(ctx, "/api/profile", profile_handler, app_context);
     mg_set_request_handler(ctx, "/api/printer-database", printer_database_handler, NULL);
+    mg_set_request_handler(ctx, "/api/printer-suggestion", printer_suggestion_handler, app_context);
     mg_set_request_handler(ctx, "/api/upload", upload_handler, app_context);
     mg_set_request_handler(ctx, "/api/print/start", print_start_handler, app_context);
     mg_set_request_handler(ctx, "/api/print/cancel", print_cancel_handler, app_context);

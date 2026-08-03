@@ -159,7 +159,7 @@ static void try_auto_detect_profile(PrinterState *state, PrinterProfile *profile
 
     *profile = match->profile;
     profile->source = PRINTER_PROFILE_SOURCE_AUTO;
-    snprintf(profile->detected_name, sizeof(profile->detected_name), "%s", match->name);
+    snprintf(profile->printer_name, sizeof(profile->printer_name), "%s", match->name);
 
     printer_profile_save(profile, profile_path);
 
