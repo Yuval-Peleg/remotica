@@ -63,7 +63,7 @@ function SpecList({ specs }) {
 }
 
 export function Settings() {
-  const { connected, connectionType, firmwareInfo } = usePrinterState();
+  const { connected, connectionType } = usePrinterState();
 
   const [profile, setProfile] = useState(null);
   const [printers, setPrinters] = useState([]);
@@ -118,7 +118,17 @@ export function Settings() {
 
   const selectedPreset = printers.find((p) => p.id === selectedId) ?? null;
   const isManual = selectedId === MANUAL_ID;
+
+  // This panel reads everything out of the one /api/printer-suggestion
+  // snapshot rather than mixing in the live WebSocket state: the match, the
+  // firmware line it came from, and whether a printer was attached when it
+  // was taken all have to describe the same moment, or the page can end up
+  // claiming there's no printer while already holding a match for one. The
+  // connection badge above still shows live state, and the snapshot is
+  // refetched whenever that flips.
   const match = suggestion?.match ?? null;
+  const printerAttached = suggestion?.connected ?? false;
+  const firmwareInfo = suggestion?.firmwareInfo || "";
 
   const handleSelect = (id) => {
     userPickedRef.current = true;
@@ -198,7 +208,14 @@ export function Settings() {
             connectionType={connectionType}
           />
 
-          {!connected ? (
+          {suggestion === null ? (
+            // Distinct from "nothing is connected": until this resolves we
+            // genuinely don't know yet, and on a phone across the LAN that
+            // gap is long enough to read.
+            <p className="text-sm text-muted-foreground">
+              Checking what&apos;s connected...
+            </p>
+          ) : !printerAttached ? (
             <p className="text-sm text-muted-foreground">
               No printer connected. Plug one in over USB and Remotica will ask
               it what it is.
