@@ -128,7 +128,7 @@ export function Dashboard() {
 
   return (
     <main className="mx-auto grid max-w-7xl gap-6 px-4 py-6 sm:px-6 lg:grid-cols-[minmax(0,360px)_1fr] lg:px-8">
-      <section className="flex flex-col gap-4">
+      <section className="flex motion-stagger flex-col gap-4">
         <Card>
           <CardContent className="flex flex-col gap-4">
             <ConnectionStatus
@@ -147,7 +147,7 @@ export function Dashboard() {
             />
 
             {isPrintActive ? (
-              <div className="flex gap-2">
+              <div className="flex animate-pop gap-2">
                 <Button
                   className="flex-1 bg-amber-500 text-amber-950 hover:bg-amber-500/80"
                   onClick={() =>
@@ -170,7 +170,7 @@ export function Dashboard() {
               </div>
             ) : (
               <Button
-                className="w-full"
+                className="w-full animate-pop"
                 disabled={job.status !== "ready"}
                 onClick={() => {
                   // job.status can still be "ready" from before a
@@ -198,7 +198,7 @@ export function Dashboard() {
 
               <div
                 className={cn(
-                  "grid transition-[grid-template-rows] duration-300 ease-in-out",
+                  "grid transition-[grid-template-rows] duration-400 ease-smooth",
                   hasFile ? "grid-rows-[1fr]" : "grid-rows-[0fr]"
                 )}
               >
@@ -211,9 +211,14 @@ export function Dashboard() {
                   <div className="flex flex-col gap-1.5 pt-4">
                     <div className="flex items-center justify-between text-xs text-muted-foreground">
                       <span>Progress</span>
-                      <span>{Math.round(job.progress)}%</span>
+                      <span className="tabular-nums">
+                        {Math.round(job.progress)}%
+                      </span>
                     </div>
-                    <Progress value={job.progress} />
+                    <Progress
+                      value={job.progress}
+                      active={job.status === "printing"}
+                    />
                   </div>
                 </div>
               </div>
@@ -228,7 +233,7 @@ export function Dashboard() {
         </Card>
       </section>
 
-      <section className="flex flex-col gap-4">
+      <section className="flex motion-stagger flex-col gap-4">
         <CameraView />
 
         <Card>
@@ -263,7 +268,7 @@ export function Dashboard() {
       <Dialog open={showFinishedDialog} onOpenChange={setShowFinishedDialog}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader className="items-center text-center">
-            <CheckCircle2 className="size-12 text-primary" />
+            <CheckCircle2 className="size-12 animate-pop text-primary" />
             <DialogTitle className="text-lg">Print finished</DialogTitle>
             <DialogDescription>
               {fileLabel} finished printing.

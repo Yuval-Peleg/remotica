@@ -5,7 +5,11 @@ import { Progress as ProgressPrimitive } from "radix-ui";
 
 import { cn } from "@/lib/utils";
 
-function Progress({ className, value, ...props }) {
+// `active` adds a highlight travelling along the filled portion, for
+// progress that is genuinely still moving. It's the only thing on the
+// dashboard that distinguishes "printing" from "paused at 40%" at a
+// glance, so it's deliberately opt-in rather than always on.
+function Progress({ className, value, active = false, ...props }) {
   return (
     <ProgressPrimitive.Root
       data-slot="progress"
@@ -17,9 +21,13 @@ function Progress({ className, value, ...props }) {
     >
       <ProgressPrimitive.Indicator
         data-slot="progress-indicator"
-        className="size-full flex-1 bg-primary transition-all"
+        className="relative size-full flex-1 overflow-hidden bg-primary transition-transform duration-500 ease-soft"
         style={{ transform: `translateX(-${100 - (value || 0)}%)` }}
-      />
+      >
+        {active && (
+          <span className="absolute inset-0 animate-sheen bg-gradient-to-r from-transparent via-primary-foreground/40 to-transparent" />
+        )}
+      </ProgressPrimitive.Indicator>
     </ProgressPrimitive.Root>
   );
 }

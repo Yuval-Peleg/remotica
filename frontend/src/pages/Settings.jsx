@@ -130,6 +130,19 @@ export function Settings() {
   const printerAttached = suggestion?.connected ?? false;
   const firmwareInfo = suggestion?.firmwareInfo || "";
 
+  // Names which of the four states the panel below is showing, purely so
+  // it can be used as a React key: plugging a printer in mid-visit should
+  // visibly replace the panel, not mutate it in place while nobody's
+  // looking at that corner of the screen.
+  const suggestionView =
+    suggestion === null
+      ? "checking"
+      : !printerAttached
+        ? "absent"
+        : match
+          ? `match:${match.id}`
+          : "unknown";
+
   const handleSelect = (id) => {
     userPickedRef.current = true;
     setError(null);
@@ -208,88 +221,94 @@ export function Settings() {
             connectionType={connectionType}
           />
 
-          {suggestion === null ? (
-            // Distinct from "nothing is connected": until this resolves we
-            // genuinely don't know yet, and on a phone across the LAN that
-            // gap is long enough to read.
-            <p className="text-sm text-muted-foreground">
-              Checking what&apos;s connected...
-            </p>
-          ) : !printerAttached ? (
-            <p className="text-sm text-muted-foreground">
-              No printer connected. Plug one in over USB and Remotica will ask
-              it what it is.
-            </p>
-          ) : match ? (
-            <>
-              <div className="flex items-start gap-3">
-                <Sparkles className="mt-0.5 size-5 shrink-0 text-primary" />
-                <div className="flex flex-col gap-0.5">
-                  <span className="font-heading text-lg leading-tight font-semibold text-foreground">
+          <div
+            key={suggestionView}
+            className="flex animate-fade flex-col gap-4"
+          >
+            {suggestion === null ? (
+              // Distinct from "nothing is connected": until this resolves we
+              // genuinely don't know yet, and on a phone across the LAN that
+              // gap is long enough to read.
+              <p className="text-sm text-muted-foreground">
+                Checking what&apos;s connected...
+              </p>
+            ) : !printerAttached ? (
+              <p className="text-sm text-muted-foreground">
+                No printer connected. Plug one in over USB and Remotica will ask
+                it what it is.
+              </p>
+            ) : match ? (
+              <>
+                <div className="flex items-start gap-3">
+                  <Sparkles className="mt-0.5 size-5 shrink-0 text-primary" />
+                  <div className="flex flex-col gap-0.5">
+                    <span className="font-heading text-lg leading-tight font-semibold text-foreground">
+                      {match.name}
+                    </span>
+                    <span className="text-xs text-muted-foreground tabular-nums">
+                      {buildVolume(match)} build volume · up to{" "}
+                      {formatNumber(match.maxHotendTempC)}°C hotend,{" "}
+                      {formatNumber(match.maxBedTempC)}°C bed
+                    </span>
+                  </div>
+                </div>
+
+                {firmwareInfo && (
+                  <div className="rounded-md border border-border bg-background/60 p-2.5">
+                    <p className="text-[0.65rem] font-medium tracking-wide text-muted-foreground uppercase">
+                      What the printer reported
+                    </p>
+                    <p className="mt-1 font-mono text-xs break-all text-foreground">
+                      {firmwareInfo}
+                    </p>
+                  </div>
+                )}
+
+                <Separator />
+                <p className="text-sm text-muted-foreground">
+                  Remotica thinks this is a{" "}
+                  <span className="font-medium text-foreground">
                     {match.name}
                   </span>
-                  <span className="text-xs text-muted-foreground tabular-nums">
-                    {buildVolume(match)} build volume · up to{" "}
-                    {formatNumber(match.maxHotendTempC)}°C hotend,{" "}
-                    {formatNumber(match.maxBedTempC)}°C bed
-                  </span>
+                  , going by the model name in that reply. Check it yourself
+                  before you print — the wrong match means the wrong bed size
+                  and temperature limits.
+                </p>
+              </>
+            ) : (
+              <>
+                <div className="flex items-start gap-3">
+                  <Search className="mt-0.5 size-5 shrink-0 text-muted-foreground" />
+                  <div className="flex flex-col gap-0.5">
+                    <span className="font-heading text-lg leading-tight font-semibold text-foreground">
+                      Not recognised
+                    </span>
+                    <span className="text-xs text-muted-foreground">
+                      This printer didn&apos;t report a model name Remotica
+                      knows.
+                    </span>
+                  </div>
                 </div>
-              </div>
 
-              {firmwareInfo && (
-                <div className="rounded-md border border-border bg-background/60 p-2.5">
-                  <p className="text-[0.65rem] font-medium tracking-wide text-muted-foreground uppercase">
-                    What the printer reported
-                  </p>
-                  <p className="mt-1 font-mono text-xs break-all text-foreground">
-                    {firmwareInfo}
-                  </p>
-                </div>
-              )}
+                {firmwareInfo && (
+                  <div className="rounded-md border border-border bg-background/60 p-2.5">
+                    <p className="text-[0.65rem] font-medium tracking-wide text-muted-foreground uppercase">
+                      What the printer reported
+                    </p>
+                    <p className="mt-1 font-mono text-xs break-all text-foreground">
+                      {firmwareInfo}
+                    </p>
+                  </div>
+                )}
 
-              <Separator />
-              <p className="text-sm text-muted-foreground">
-                Remotica thinks this is a{" "}
-                <span className="font-medium text-foreground">
-                  {match.name}
-                </span>
-                , going by the model name in that reply. Check it yourself
-                before you print — the wrong match means the wrong bed size and
-                temperature limits.
-              </p>
-            </>
-          ) : (
-            <>
-              <div className="flex items-start gap-3">
-                <Search className="mt-0.5 size-5 shrink-0 text-muted-foreground" />
-                <div className="flex flex-col gap-0.5">
-                  <span className="font-heading text-lg leading-tight font-semibold text-foreground">
-                    Not recognised
-                  </span>
-                  <span className="text-xs text-muted-foreground">
-                    This printer didn&apos;t report a model name Remotica knows.
-                  </span>
-                </div>
-              </div>
-
-              {firmwareInfo && (
-                <div className="rounded-md border border-border bg-background/60 p-2.5">
-                  <p className="text-[0.65rem] font-medium tracking-wide text-muted-foreground uppercase">
-                    What the printer reported
-                  </p>
-                  <p className="mt-1 font-mono text-xs break-all text-foreground">
-                    {firmwareInfo}
-                  </p>
-                </div>
-              )}
-
-              <Separator />
-              <p className="text-sm text-muted-foreground">
-                Most printers don&apos;t announce their model over USB, so this
-                is normal. Pick yours below, or enter its specs by hand.
-              </p>
-            </>
-          )}
+                <Separator />
+                <p className="text-sm text-muted-foreground">
+                  Most printers don&apos;t announce their model over USB, so
+                  this is normal. Pick yours below, or enter its specs by hand.
+                </p>
+              </>
+            )}
+          </div>
         </CardContent>
       </Card>
 
@@ -299,7 +318,7 @@ export function Settings() {
         </CardHeader>
         <CardContent className="flex flex-col gap-4">
           {profile?.source === "default" && (
-            <Alert>
+            <Alert className="animate-pop">
               <AlertDescription>
                 No printer chosen yet. Jogging, homing, and starting a print
                 stay blocked until you save one here.
@@ -349,7 +368,7 @@ export function Settings() {
           </div>
 
           {isManual && manualForm && (
-            <>
+            <div className="flex animate-rise flex-col gap-4">
               <div className="flex flex-col gap-1.5">
                 <label
                   htmlFor="printerName"
@@ -383,24 +402,32 @@ export function Settings() {
                   </div>
                 ))}
               </div>
-            </>
+            </div>
           )}
 
-          {selectedPreset && <SpecList specs={selectedPreset} />}
+          {/* Keyed on the selection so switching between two presets
+              replays the entrance — without it React updates the same
+              <dl> in place and six numbers silently change value, which
+              is easy to miss when they're the whole point of the panel. */}
+          {selectedPreset && (
+            <div key={selectedId} className="animate-rise">
+              <SpecList specs={selectedPreset} />
+            </div>
+          )}
 
           {error && (
-            <Alert variant="destructive">
+            <Alert variant="destructive" className="animate-pop">
               <AlertDescription>{error}</AlertDescription>
             </Alert>
           )}
 
           {(selectedPreset || (isManual && manualForm)) && (
-            <div className="flex items-center gap-3">
+            <div className="flex animate-rise items-center gap-3">
               <Button onClick={handleSave} disabled={saving}>
                 {saving ? "Saving..." : "Use this printer"}
               </Button>
               {saved && (
-                <span className="flex items-center gap-1 text-sm text-primary">
+                <span className="flex animate-pop items-center gap-1 text-sm text-primary">
                   <Check className="size-4" />
                   Saved
                 </span>

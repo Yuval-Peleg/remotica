@@ -18,6 +18,10 @@ const navLinks = [
   { to: "/about", label: "About" },
 ];
 
+// The underline is an ::after bar that's always present but scaled to
+// zero width, so showing it is a transform rather than a layout change —
+// it grows out from the centre instead of the text jumping when a border
+// appears and disappears.
 function NavItem({ to, label, end, onNavigate }) {
   return (
     <NavLink
@@ -26,8 +30,10 @@ function NavItem({ to, label, end, onNavigate }) {
       onClick={onNavigate}
       className={({ isActive }) =>
         cn(
-          "text-sm font-medium text-muted-foreground transition-colors hover:text-foreground",
-          isActive && "text-foreground"
+          "relative py-1 text-sm font-medium text-muted-foreground transition-colors duration-200 ease-soft hover:text-foreground",
+          "after:absolute after:inset-x-0 after:-bottom-0.5 after:h-0.5 after:origin-center after:scale-x-0 after:rounded-full after:bg-primary after:transition-transform after:duration-300 after:ease-soft",
+          "hover:after:scale-x-100",
+          isActive && "text-foreground after:scale-x-100"
         )
       }
     >
@@ -40,7 +46,10 @@ export function Navbar() {
   return (
     <header className="sticky top-0 z-50 border-b border-border bg-background/95 backdrop-blur supports-backdrop-filter:bg-background/80">
       <nav className="mx-auto flex h-16 max-w-7xl items-center justify-between px-4 sm:px-6 lg:px-8">
-        <Link to="/" className="flex items-center gap-2">
+        <Link
+          to="/"
+          className="flex items-center gap-2 transition-transform duration-300 ease-spring hover:scale-[1.03]"
+        >
           <span className="bg-gradient-to-t from-brand-to to-brand-from bg-clip-text text-2xl font-bold tracking-wide text-transparent">
             REMOTICA
           </span>
@@ -71,7 +80,7 @@ export function Navbar() {
                     end={link.end}
                     className={({ isActive }) =>
                       cn(
-                        "rounded-md px-3 py-2 text-sm font-medium text-muted-foreground hover:bg-muted hover:text-foreground",
+                        "rounded-md px-3 py-2 text-sm font-medium text-muted-foreground transition-all duration-200 ease-soft hover:translate-x-0.5 hover:bg-muted hover:text-foreground",
                         isActive && "bg-muted text-foreground"
                       )
                     }

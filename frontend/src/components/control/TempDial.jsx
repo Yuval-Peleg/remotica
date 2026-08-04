@@ -31,6 +31,9 @@ export function TempDial({
     Math.min(current / MAX_TEMP, 1),
     MIN_VISIBLE_PROGRESS
   );
+  // 2°C of slack so ordinary sensor jitter at a reached target doesn't
+  // flicker the glow on and off.
+  const isHeating = target > current + 2;
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(String(target));
 
@@ -69,9 +72,19 @@ export function TempDial({
             strokeWidth={STROKE_WIDTH}
             strokeLinecap="round"
             stroke={color}
-            className="fill-none transition-[stroke-dashoffset] duration-500"
+            className="fill-none transition-[stroke-dashoffset,filter] duration-700 ease-soft"
             strokeDasharray={CIRCUMFERENCE}
             strokeDashoffset={CIRCUMFERENCE * (1 - progress)}
+            // Glows while the heater is actually climbing towards a
+            // target. Static rather than pulsing on purpose — a readout
+            // that throbs is harder to read at a glance, and this one is
+            // next to a number someone may be checking against a
+            // filament spec.
+            style={
+              isHeating
+                ? { filter: `drop-shadow(0 0 4px ${color})` }
+                : undefined
+            }
           />
         </svg>
         <div className="absolute inset-0 flex flex-col items-center justify-center">

@@ -48,9 +48,9 @@ export function ControlPanel({
     <div className="relative flex flex-col gap-4">
       <div
         className={cn(
-          "flex flex-col gap-6 lg:flex-row lg:items-center",
+          "flex flex-col gap-6 transition-opacity duration-300 ease-soft lg:flex-row lg:items-center",
           (isPrintActive || !isProfileConfigured) &&
-            "pointer-events-none opacity-70"
+            "pointer-events-none opacity-60"
         )}
       >
         <div className="mx-auto w-full max-w-xs lg:mx-0">
@@ -112,8 +112,8 @@ export function ControlPanel({
       </div>
 
       {!isProfileConfigured ? (
-        <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 rounded-lg bg-background/40 text-center">
-          <Lock className="size-5 text-muted-foreground" />
+        <div className="absolute inset-0 z-10 flex animate-fade flex-col items-center justify-center gap-2 rounded-lg bg-background/40 text-center backdrop-blur-[2px]">
+          <Lock className="size-5 animate-pop text-muted-foreground" />
           <p className="max-w-56 text-xs text-muted-foreground">
             Choose your printer in Settings before controlling it
           </p>
@@ -126,8 +126,8 @@ export function ControlPanel({
         </div>
       ) : (
         isPrintActive && (
-          <div className="pointer-events-none absolute inset-0 z-10 flex flex-col items-center justify-center gap-1 rounded-lg bg-background/40 text-center">
-            <Lock className="size-5 text-muted-foreground" />
+          <div className="pointer-events-none absolute inset-0 z-10 flex animate-fade flex-col items-center justify-center gap-1 rounded-lg bg-background/40 text-center backdrop-blur-[2px]">
+            <Lock className="size-5 animate-pop text-muted-foreground" />
             <p className="max-w-56 text-xs text-muted-foreground">
               Can&apos;t manually control the printer mid-print
             </p>

@@ -122,7 +122,7 @@ export function CameraView() {
               <img
                 src="/api/camera/stream"
                 alt="Printer camera stream"
-                className="size-full object-contain"
+                className="size-full animate-fade object-contain"
                 onError={() => setStreamFailed(true)}
               />
               {info.name && (
@@ -132,21 +132,25 @@ export function CameraView() {
               )}
               {liveStatus !== "pending" && (
                 <div
+                  key={liveStatus}
                   className={cn(
-                    "pointer-events-none absolute right-2 top-2 flex items-center gap-1.5 rounded-full border px-2 py-1 text-xs font-medium backdrop-blur-sm",
+                    "pointer-events-none absolute right-2 top-2 flex animate-pop items-center gap-1.5 rounded-full border px-2 py-1 text-xs font-medium backdrop-blur-sm transition-colors duration-300 ease-soft",
                     liveStatus === "live"
                       ? "border-primary/40 bg-background/70 text-primary"
                       : "border-amber-500/40 bg-background/70 text-amber-500"
                   )}
                 >
-                  <span
-                    className={cn(
-                      "size-1.5 rounded-full",
-                      liveStatus === "live"
-                        ? "animate-pulse bg-primary"
-                        : "bg-amber-500"
+                  <span className="relative flex size-1.5 shrink-0">
+                    {liveStatus === "live" && (
+                      <span className="absolute inset-0 animate-halo rounded-full bg-primary" />
                     )}
-                  />
+                    <span
+                      className={cn(
+                        "relative size-1.5 rounded-full",
+                        liveStatus === "live" ? "bg-primary" : "bg-amber-500"
+                      )}
+                    />
+                  </span>
                   {liveStatus === "live" ? "Live" : "No new frames"}
                 </div>
               )}

@@ -23,12 +23,12 @@ export function GcodeDropzone({
 
   if (filename) {
     return (
-      <div className="relative aspect-square w-full overflow-hidden rounded-lg border border-border bg-secondary/40">
+      <div className="relative aspect-square w-full animate-fade overflow-hidden rounded-lg border border-border bg-secondary/40">
         {thumbnail ? (
           <img
             src={thumbnail}
             alt={`${filename} thumbnail`}
-            className="h-full w-full object-cover"
+            className="h-full w-full animate-fade object-cover"
           />
         ) : (
           <div className="flex h-full w-full flex-col items-center justify-center gap-2 text-muted-foreground">
@@ -62,11 +62,16 @@ export function GcodeDropzone({
         onDragLeave={() => setIsDragOver(false)}
         onDrop={handleDrop}
         className={cn(
-          "flex aspect-square w-full cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-border text-center transition-colors hover:border-primary hover:bg-secondary/30",
-          isDragOver && "border-primary bg-secondary/30"
+          "group/drop flex aspect-square w-full cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-border text-center transition-all duration-200 ease-soft hover:border-primary hover:bg-secondary/30",
+          isDragOver && "scale-[1.02] border-primary bg-secondary/30"
         )}
       >
-        <UploadCloud className="size-8 text-muted-foreground" />
+        <UploadCloud
+          className={cn(
+            "size-8 text-muted-foreground transition-transform duration-300 ease-spring group-hover/drop:-translate-y-0.5",
+            isDragOver && "-translate-y-1 scale-110 text-primary"
+          )}
+        />
         <span className="text-sm font-medium text-foreground">
           Drop a .gcode file here
         </span>
@@ -86,7 +91,7 @@ export function GcodeDropzone({
       </label>
 
       {error && (
-        <Alert variant="destructive">
+        <Alert variant="destructive" className="animate-pop">
           <AlertDescription>{error}</AlertDescription>
         </Alert>
       )}

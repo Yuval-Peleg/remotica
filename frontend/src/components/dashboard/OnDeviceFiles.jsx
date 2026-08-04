@@ -31,10 +31,10 @@ function FileRow({ file, isSelected, disabled, onSelect, onDelete }) {
   return (
     <div
       className={cn(
-        "flex items-center gap-3 rounded-lg border p-2",
+        "flex items-center gap-3 rounded-lg border p-2 transition-colors duration-200 ease-soft",
         isSelected
           ? "border-primary bg-primary/10"
-          : "border-border bg-secondary/20"
+          : "border-border bg-secondary/20 hover:border-border/80 hover:bg-secondary/40"
       )}
     >
       <button
@@ -125,18 +125,21 @@ export function OnDeviceFiles({
       >
         <span>On device</span>
         <ChevronRight
-          className={cn("size-4 transition-transform", expanded && "rotate-90")}
+          className={cn(
+            "size-4 transition-transform duration-300 ease-spring",
+            expanded && "rotate-90"
+          )}
         />
       </button>
 
       <div
         className={cn(
-          "grid transition-[grid-template-rows] duration-300 ease-in-out",
+          "grid transition-[grid-template-rows] duration-400 ease-smooth",
           expanded ? "grid-rows-[1fr]" : "grid-rows-[0fr]"
         )}
       >
         <div className="overflow-hidden">
-          <div className="flex flex-col gap-2 pt-1 pb-1">
+          <div className="flex motion-stagger flex-col gap-2 pt-1 pb-1">
             {files.length === 0 ? (
               <p className="py-2 text-center text-xs text-muted-foreground">
                 No gcode files saved on this device yet.
