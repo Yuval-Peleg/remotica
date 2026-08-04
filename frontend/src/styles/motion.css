@@ -1,0 +1,172 @@
+/* ============================================================
+   Remotica motion
+   ============================================================
+
+   Every animation and transition token in the app lives here, so the
+   whole look can be turned off or retuned from one place.
+
+   TO TURN ALL MOTION OFF:
+     add data-motion="off" to the <html> tag in frontend/index.html
+     -> <html lang="en" data-motion="off">
+   That kills every transition and animation app-wide, including the
+   Tailwind `transition-*` utilities written inline in components, so
+   nothing has to be unpicked component by component.
+
+   Motion is also disabled automatically for anyone whose OS asks for
+   reduced motion — see the bottom of this file.
+
+   House style, for anything added later:
+   - Entrances move a short distance and land. Nothing loops except
+     status indicators that are reporting something genuinely live.
+   - Nothing animates on a value the printer reports. A temperature
+     arriving is not an event worth celebrating, and a readout that
+     slides every 300ms is harder to read, not easier.
+   - Locking overlays fade in; unlocking is instant. Being told you
+     can't touch something should feel deliberate, but getting control
+     back should never make you wait for a fade.
+   ============================================================ */
+
+@theme {
+  /* Decelerating, no overshoot — the default for entrances and for
+     anything covering distance. */
+  --ease-soft: cubic-bezier(0.22, 1, 0.36, 1);
+  /* Slight overshoot, for small elements that appear in response to a
+     click (a "Saved" tick, a badge swapping state). */
+  --ease-spring: cubic-bezier(0.34, 1.4, 0.64, 1);
+  /* Symmetric, for things that expand and collapse. */
+  --ease-smooth: cubic-bezier(0.65, 0, 0.35, 1);
+
+  --animate-rise: rm-rise 420ms var(--ease-soft) backwards;
+  --animate-fade: rm-fade 300ms var(--ease-soft) backwards;
+  --animate-pop: rm-pop 260ms var(--ease-spring) backwards;
+  --animate-sheen: rm-sheen 1.8s linear infinite;
+  --animate-halo: rm-halo 2s var(--ease-smooth) infinite;
+
+  @keyframes rm-rise {
+    from {
+      opacity: 0;
+      transform: translateY(10px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  @keyframes rm-fade {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+
+  @keyframes rm-pop {
+    from {
+      opacity: 0;
+      transform: scale(0.92);
+    }
+    to {
+      opacity: 1;
+      transform: scale(1);
+    }
+  }
+
+  /* Travelling highlight along a progress bar. Sized 200% of the bar so
+     the gradient has somewhere to travel from and to. */
+  @keyframes rm-sheen {
+    from {
+      transform: translateX(-100%);
+    }
+    to {
+      transform: translateX(100%);
+    }
+  }
+
+  /* Expanding ring behind a status dot. Deliberately not Tailwind's
+     animate-pulse: dimming the dot itself reads as "signal fading",
+     which is the opposite of what a live indicator should say. */
+  @keyframes rm-halo {
+    0% {
+      opacity: 0.55;
+      transform: scale(1);
+    }
+    70%,
+    100% {
+      opacity: 0;
+      transform: scale(2.6);
+    }
+  }
+}
+
+/* Route-level entrance. Applied to a wrapper keyed on the pathname in
+   App.jsx, so React remounts it on navigation and the animation replays.
+   Enter-only by design — an exit animation would mean holding the old
+   page on screen after a click, which makes navigation feel slower even
+   though it looks busier. */
+.motion-page {
+  animation: rm-rise 340ms var(--ease-soft) backwards;
+}
+
+/* Cascade direct children in. One class on the container is enough —
+   children get both the entrance and their offset, so nothing has to be
+   annotated item by item (which also means a list built from a .map()
+   needs no index plumbing).
+
+   Delays are capped at 8 steps: past that the last item waits long
+   enough that it reads as a loading bug rather than a flourish. */
+.motion-stagger > * {
+  animation: rm-rise 420ms var(--ease-soft) backwards;
+}
+
+.motion-stagger > *:nth-child(1) {
+  animation-delay: 0ms;
+}
+.motion-stagger > *:nth-child(2) {
+  animation-delay: 70ms;
+}
+.motion-stagger > *:nth-child(3) {
+  animation-delay: 140ms;
+}
+.motion-stagger > *:nth-child(4) {
+  animation-delay: 210ms;
+}
+.motion-stagger > *:nth-child(5) {
+  animation-delay: 280ms;
+}
+.motion-stagger > *:nth-child(6) {
+  animation-delay: 350ms;
+}
+.motion-stagger > *:nth-child(7) {
+  animation-delay: 420ms;
+}
+.motion-stagger > *:nth-child(n + 8) {
+  animation-delay: 490ms;
+}
+
+/* ============================================================
+   Kill switch
+   ============================================================ */
+
+:root[data-motion="off"] *,
+:root[data-motion="off"] *::before,
+:root[data-motion="off"] *::after {
+  animation-duration: 0.01ms !important;
+  animation-delay: 0ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
+  transition-delay: 0ms !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-delay: 0ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    transition-delay: 0ms !important;
+  }
+}

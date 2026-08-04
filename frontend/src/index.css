@@ -1,6 +1,8 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
+/* Easing/animation tokens and the app-wide motion kill switch. */
+@import "./styles/motion.css";
 
 @custom-variant dark (&:is(.dark *));
 
