@@ -1,0 +1,109 @@
+name: Release
+
+# Cutting a release is `git tag v0.1.0 && git push --tags`. Everything
+# below then produces what packaging/install.sh downloads.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Load-bearing: backend/Makefile takes the version from
+          # `git describe --tags`, and the default shallow clone has no
+          # tags at all — every release would silently ship as "dev".
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build the dashboard
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build the backend
+        working-directory: backend
+        run: make
+
+      - name: Assemble the release payload
+        run: |
+          DIR="remotica-linux-${{ matrix.arch }}"
+          mkdir -p "$DIR"
+          cp backend/build/remotica-backend "$DIR/remotica"
+          cp -r frontend/dist "$DIR/web"
+          cp packaging/remotica.service "$DIR/"
+          cp packaging/sudoers.remotica "$DIR/"
+          cp packaging/install.sh "$DIR/"
+          cp udev/99-remotica-serial.rules "$DIR/"
+          chmod +x "$DIR/remotica" "$DIR/install.sh"
+          tar -czf "$DIR.tar.gz" "$DIR"
+
+      - name: Check the payload is what the installer expects
+        run: |
+          DIR="remotica-linux-${{ matrix.arch }}"
+          for f in remotica web/index.html remotica.service sudoers.remotica install.sh 99-remotica-serial.rules; do
+            test -e "$DIR/$f" || { echo "missing $f"; exit 1; }
+          done
+          # A tarball whose sudoers file doesn't parse would install a
+          # broken boot toggle on every machine that ran it.
+          visudo -c -f "$DIR/sudoers.remotica"
+          sh -n "$DIR/install.sh"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: remotica-linux-${{ matrix.arch }}
+          path: remotica-linux-${{ matrix.arch }}.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Checksum every tarball
+        run: |
+          cd artifacts
+          sha256sum *.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+
+      # install.sh is attached on its own as well as inside each tarball,
+      # because it has to be fetchable before anything else exists —
+      # that's the one-line install command in the README.
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/*.tar.gz
+            artifacts/SHA256SUMS
+            packaging/install.sh
+          generate_release_notes: true
