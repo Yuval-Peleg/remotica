@@ -24,6 +24,9 @@ static const char *const INHIBIT_PATHS[] = {
 
 static pid_t s_child = -1;
 static int s_unavailable_logged = 0;
+/* Set when a lock was attempted and logind didn't have it. Stops this
+ * retrying (and re-warning) every 300ms for the rest of the print. */
+static int s_failed = 0;
 
 static const char *find_inhibit_tool(void) {
     for (size_t i = 0; i < sizeof(INHIBIT_PATHS) / sizeof(INHIBIT_PATHS[0]); i++) {
@@ -32,6 +35,40 @@ static const char *find_inhibit_tool(void) {
         }
     }
     return NULL;
+}
+
+/* Asks logind whether our lock actually exists. Returns 1 only on a
+ * confirmed sighting.
+ *
+ * `systemd-inhibit --list` is the same view the user gets from a
+ * terminal, which matters: when this disagrees with the dashboard, the
+ * dashboard is what's wrong. Given a moment first, because the child has
+ * to exec and register before it can appear. */
+static int lock_registered_with_logind(void) {
+    const char *tool = find_inhibit_tool();
+    if (tool == NULL) {
+        return 0;
+    }
+
+    usleep(400 * 1000);
+
+    char command[256];
+    snprintf(command, sizeof(command), "%s --list 2>/dev/null", tool);
+
+    FILE *pipe = popen(command, "r");
+    if (pipe == NULL) {
+        return 0;
+    }
+
+    int found = 0;
+    char line[512];
+    while (fgets(line, sizeof(line), pipe) != NULL) {
+        if (strstr(line, "Remotica") != NULL) {
+            found = 1;
+        }
+    }
+    pclose(pipe);
+    return found;
 }
 
 static void acquire(void) {
@@ -68,7 +105,31 @@ static void acquire(void) {
     }
 
     s_child = pid;
-    printf("Blocking automatic suspend while the print runs.\n");
+
+    /* Forking successfully is NOT the same as holding the lock, and
+     * treating it as such is how this went wrong once already: a machine
+     * suspended mid-print while the dashboard cheerfully reported sleep
+     * as blocked, because all this code actually knew was that it had
+     * started a process. If systemd-inhibit can't reach logind, or is
+     * refused, the child can sit there having registered nothing.
+     *
+     * So ask logind what it actually has. Anything other than a
+     * confirmed lock is reported as not held — better a UI that admits
+     * it can't protect the print than one that claims it can. */
+    if (!lock_registered_with_logind()) {
+        printf("WARNING: asked to block suspend for this print, but logind reports no such "
+               "lock. This machine may still suspend mid-print, which stops the print but "
+               "NOT the printer's heaters. Disable sleep instead — see the README.\n");
+        fflush(stdout);
+        kill(s_child, SIGTERM);
+        waitpid(s_child, NULL, 0);
+        s_child = -1;
+        s_failed = 1;
+        return;
+    }
+
+    s_failed = 0;
+    printf("Blocking automatic suspend while the print runs (confirmed with logind).\n");
     fflush(stdout);
 }
 
@@ -96,10 +157,11 @@ void power_inhibit_set(int active) {
         s_child = -1;
     }
 
-    if (active && s_child <= 0) {
+    if (active && s_child <= 0 && !s_failed) {
         acquire();
-    } else if (!active && s_child > 0) {
+    } else if (!active) {
         release();
+        s_failed = 0; /* a new print gets a fresh attempt */
     }
 }
 
