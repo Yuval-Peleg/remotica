@@ -84,6 +84,10 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Needs the tag objects themselves, not just the commit — the
+          # release description is read out of the annotated tag below.
+          fetch-depth: 0
 
       - uses: actions/download-artifact@v4
         with:
@@ -96,6 +100,39 @@ jobs:
           sha256sum *.tar.gz > SHA256SUMS
           cat SHA256SUMS
 
+      # The release description is the annotated tag's own message, so
+      # what people read on the release page is something written on
+      # purpose when the release was cut — not an auto-generated list of
+      # commit subjects, which says what changed in the repo rather than
+      # what changed for someone installing it.
+      #
+      # Tag releases with `git tag -a vX.Y.Z` and write that message.
+      - name: Build the release description
+        id: notes
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          MESSAGE=$(git tag -l --format='%(contents:body)' "$TAG")
+          if [ -z "$(printf '%s' "$MESSAGE" | tr -d '[:space:]')" ]; then
+            MESSAGE="See the README for what Remotica is and how to install it."
+          fi
+
+          {
+            printf 'body<<RELEASE_NOTES_EOF\n'
+            printf '%s\n\n' "$MESSAGE"
+            printf -- '---\n\n'
+            printf '## Installing\n\n'
+            printf 'On the machine wired to your printer:\n\n'
+            printf '```sh\n'
+            printf 'curl -fsSL https://github.com/%s/releases/latest/download/install.sh | sudo sh\n' "$GITHUB_REPOSITORY"
+            printf '```\n\n'
+            printf 'Prebuilt for x86_64 and arm64. No toolchain, no Node, no checkout needed on that machine. '
+            printf 'Re-running the command upgrades in place and keeps your printer profile and uploaded G-code.\n\n'
+            printf 'Already installed? `sudo remotica-uninstall` removes it (add `--purge` to delete your data too).\n\n'
+            printf '**Remotica has no login of any kind — anyone on your network who opens the dashboard can control your printer.** '
+            printf 'It drives heaters and motors and has not been verified for unattended printing. See the README before using it.\n'
+            printf 'RELEASE_NOTES_EOF\n'
+          } >> "$GITHUB_OUTPUT"
+
       # install.sh is attached on its own as well as inside each tarball,
       # because it has to be fetchable before anything else exists —
       # that's the one-line install command in the README.
@@ -106,4 +143,4 @@ jobs:
             artifacts/*.tar.gz
             artifacts/SHA256SUMS
             packaging/install.sh
-          generate_release_notes: true
+          body: ${{ steps.notes.outputs.body }}
