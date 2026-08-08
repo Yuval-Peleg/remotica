@@ -43,8 +43,18 @@ typedef enum {
 /* How many recent lines are kept in memory for the backlog / GET
  * /api/console. Once full, the oldest entry is overwritten (a ring
  * buffer) — this is a live debugging aid, not a permanent print log, so
- * there's no need to ever persist it to disk. */
-#define CONSOLE_LOG_CAPACITY 300
+ * there's no need to ever persist it to disk.
+ *
+ * Raised from 300 (2026-08-08) because most of what fills it says
+ * nothing: the M105 temperature poll and its reply arrive every ~1.8s
+ * forever (TEMP_POLL_EVERY_N_TICKS in transport_serial.c), and during a
+ * print every streamed line is acknowledged with its own "ok". At 300 an
+ * idle machine flushed the last real command out of history in about
+ * four minutes. The frontend hides that chatter by default, but hiding
+ * it doesn't stop it evicting the lines worth keeping — only a bigger
+ * buffer does. ~216 bytes per entry, so 2000 is around 430KB: nothing on
+ * a machine that also runs a web server and a camera. */
+#define CONSOLE_LOG_CAPACITY 2000
 
 #define CONSOLE_LOG_MAX_WS_CLIENTS 16
 

@@ -23,6 +23,28 @@ function formatTime(timestampMs) {
 // MAX_ENTRIES rows — 500 toLocaleTimeString calls (Intl formatting, the
 // single most expensive thing here) plus 1000 cn()/tailwind-merge calls —
 // which measured ~89ms per render while a print was streaming lines.
+// Lines that say nothing about what the printer is doing, and drown out
+// the lines that do.
+//
+// Two sources, both relentless: the M105 temperature poll and its reply
+// (~every 1.8s forever, see TEMP_POLL_EVERY_N_TICKS in transport_serial.c),
+// and the bare "ok" every single command is acknowledged with — during a
+// print that's one per streamed line, so roughly half the console.
+//
+// Deliberately filtered on display rather than dropped by the backend:
+// when something is actually wrong with the serial link, these are
+// exactly the lines you need — a run of resends, a temperature reply that
+// stopped arriving. They stay in the log; the toggle just stops them
+// burying everything else.
+function isRoutineChatter(entry) {
+  const text = entry.text.trim();
+  if (entry.direction === "sent") {
+    return /^N\d+\s+M105\b/i.test(text) || /^M105\b/i.test(text);
+  }
+  // "ok" on its own, or "ok" carrying a temperature report.
+  return /^ok\b/i.test(text);
+}
+
 const ConsoleLine = memo(function ConsoleLine({ entry, plainEnglish }) {
   const isSent = entry.direction === "sent";
   const translated = plainEnglish
@@ -61,6 +83,9 @@ const ConsoleLine = memo(function ConsoleLine({ entry, plainEnglish }) {
 export const GcodeConsole = memo(function GcodeConsole() {
   const entries = useGcodeConsole();
   const [plainEnglish, setPlainEnglish] = useState(false);
+  // On by default: the noise is the complaint, and anyone who needs the
+  // acknowledgements is deliberately looking for them.
+  const [hideRoutine, setHideRoutine] = useState(true);
   const [isFollowing, setIsFollowing] = useState(true);
   const scrollRef = useRef(null);
 
@@ -103,18 +128,33 @@ export const GcodeConsole = memo(function GcodeConsole() {
     setFollowing(true);
   };
 
+  const visibleEntries = hideRoutine
+    ? entries.filter((entry) => !isRoutineChatter(entry))
+    : entries;
+  const hiddenCount = entries.length - visibleEntries.length;
+
   return (
     <div className="flex flex-col gap-3">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
         <p className="text-sm font-medium text-foreground">Printer console</p>
-        <label className="flex items-center gap-2 text-xs text-muted-foreground">
-          Plain English
-          <Switch
-            checked={plainEnglish}
-            onCheckedChange={setPlainEnglish}
-            size="sm"
-          />
-        </label>
+        <div className="flex items-center gap-4">
+          <label className="flex items-center gap-2 text-xs text-muted-foreground">
+            Hide routine
+            <Switch
+              checked={hideRoutine}
+              onCheckedChange={setHideRoutine}
+              size="sm"
+            />
+          </label>
+          <label className="flex items-center gap-2 text-xs text-muted-foreground">
+            Plain English
+            <Switch
+              checked={plainEnglish}
+              onCheckedChange={setPlainEnglish}
+              size="sm"
+            />
+          </label>
+        </div>
       </div>
 
       <div className="relative">
@@ -123,12 +163,14 @@ export const GcodeConsole = memo(function GcodeConsole() {
           onScroll={handleScroll}
           className="h-64 overflow-y-auto rounded-lg border border-border bg-secondary/20 p-3 font-mono text-xs"
         >
-          {entries.length === 0 ? (
+          {visibleEntries.length === 0 ? (
             <p className="text-muted-foreground">
-              No printer communication yet.
+              {entries.length === 0
+                ? "No printer communication yet."
+                : "Only routine polling so far — turn off \u201cHide routine\u201d to see it."}
             </p>
           ) : (
-            entries.map((entry) => (
+            visibleEntries.map((entry) => (
               <ConsoleLine
                 key={entry.id}
                 entry={entry}
@@ -149,6 +191,13 @@ export const GcodeConsole = memo(function GcodeConsole() {
           </button>
         )}
       </div>
+
+      {hideRoutine && hiddenCount > 0 && (
+        <p className="text-xs text-muted-foreground">
+          {hiddenCount} routine line{hiddenCount === 1 ? "" : "s"} hidden
+          (temperature polls and acknowledgements)
+        </p>
+      )}
     </div>
   );
 });
