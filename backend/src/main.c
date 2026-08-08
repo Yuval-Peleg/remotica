@@ -210,6 +210,38 @@ static void *reconnect_thread_main(void *arg) {
 }
 
 /* ---------------------------------------------------------------------
+ * Single-page-app fallback (only registered when --web-root is given)
+ * --------------------------------------------------------------------- */
+
+/* React Router owns /settings, /about and /system — those are not files
+ * on disk anywhere. A browser asking the *server* for one directly
+ * (pressing F5, opening a bookmark, following a link shared to a phone)
+ * would otherwise get civetweb's 404, which looks exactly like the app
+ * being broken. Serving index.html instead lets the router take over on
+ * the client and render the right page.
+ *
+ * Registered on "/", which civetweb only reaches after every more
+ * specific handler and every real file under document_root have been
+ * tried — so this cannot shadow a route or a real asset. The explicit
+ * /api/ check is belt-and-braces for the same thing: returning 0 hands
+ * the request back to civetweb rather than answering it, so a mistyped
+ * API path still 404s as JSON-shaped nothing instead of quietly
+ * returning an HTML page to something expecting JSON. */
+static int spa_fallback_handler(struct mg_connection *conn, void *cbdata) {
+    const char *root = (const char *)cbdata;
+    const struct mg_request_info *req_info = mg_get_request_info(conn);
+
+    if (req_info->local_uri == NULL || strncmp(req_info->local_uri, "/api/", 5) == 0) {
+        return 0;
+    }
+
+    char index_path[512];
+    snprintf(index_path, sizeof(index_path), "%s/index.html", root);
+    mg_send_file(conn, index_path);
+    return 1;
+}
+
+/* ---------------------------------------------------------------------
  * main
  * --------------------------------------------------------------------- */
 
@@ -239,6 +271,16 @@ int main(int argc, char **argv) {
      * DEFAULT_DATA_DIR above for why the default is relative. */
     const char *data_dir = DEFAULT_DATA_DIR;
 
+    /* --web-root <dir> is the built frontend (frontend/dist/, installed
+     * as /usr/local/share/remotica/web). Giving it turns Remotica into
+     * the single process the deployment model describes: one binary
+     * serving both the API and the dashboard.
+     *
+     * NULL — the default, and what run.sh uses — means serve the API
+     * only and let Vite's dev server handle the frontend, which is still
+     * the right split while developing (hot reload). */
+    const char *web_root = NULL;
+
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--serial") == 0 && i + 1 < argc) {
             serial_device = argv[i + 1];
@@ -249,7 +291,20 @@ int main(int argc, char **argv) {
         } else if (strcmp(argv[i], "--data-dir") == 0 && i + 1 < argc) {
             data_dir = argv[i + 1];
             i++;
+        } else if (strcmp(argv[i], "--web-root") == 0 && i + 1 < argc) {
+            web_root = argv[i + 1];
+            i++;
         }
+    }
+
+    /* A frontend that failed to install is a broken dashboard, not a
+     * broken printer — warn loudly but keep serving the API, so the
+     * machine can still be reached and diagnosed. */
+    if (web_root != NULL && access(web_root, R_OK) != 0) {
+        fprintf(stderr,
+                "Warning: --web-root %s is not readable. The API will still work, but the "
+                "dashboard will not load.\n",
+                web_root);
     }
 
     char profile_path[512];
@@ -408,8 +463,25 @@ int main(int argc, char **argv) {
      * over weak wifi) room, since the timeout resets on any forward
      * progress; it just stops a truly dead client from making the whole
      * app feel stuck for 30+ seconds. */
-    const char *options[] = {"listening_ports",    listen_port, "num_threads", "8",
-                             "request_timeout_ms", "3000",      NULL};
+    /* Built at runtime rather than as a fixed initialiser because
+     * document_root has to be absent *entirely* — not empty — when
+     * running without --web-root. civetweb defaults document_root to the
+     * process's current directory, which in a dev checkout is backend/:
+     * that would publish the source tree, data/profile.json and every
+     * uploaded gcode file over HTTP to anyone on the LAN. */
+    const char *options[9];
+    size_t opt = 0;
+    options[opt++] = "listening_ports";
+    options[opt++] = listen_port;
+    options[opt++] = "num_threads";
+    options[opt++] = "8";
+    options[opt++] = "request_timeout_ms";
+    options[opt++] = "3000";
+    if (web_root != NULL) {
+        options[opt++] = "document_root";
+        options[opt++] = web_root;
+    }
+    options[opt] = NULL;
 
     struct mg_callbacks callbacks;
     memset(&callbacks, 0, sizeof(callbacks));
@@ -436,6 +508,12 @@ int main(int argc, char **argv) {
 
     console_log_register_routes(ctx, &console);
     camera_register_routes(ctx);
+
+    /* Registered last, and on "/", so every route above wins over it —
+     * see the comment on spa_fallback_handler for why it exists. */
+    if (web_root != NULL) {
+        mg_set_request_handler(ctx, "/", spa_fallback_handler, (void *)web_root);
+    }
 
     /* --- 5. Background tick thread + (for a real printer) reconnect thread --- */
 

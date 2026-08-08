@@ -2,6 +2,15 @@ CC ?= gcc
 CFLAGS := -std=c99 -Wall -Wextra -O2 -DNO_SSL -DUSE_WEBSOCKET
 LDFLAGS := -lpthread
 
+# Baked in at build time so GET /api/system can report which build is
+# running. `git describe` fails in a release tarball with no .git (and in
+# a shallow CI clone with no tags), so this falls back to "dev" rather
+# than breaking the build — see .github/workflows/release.yml, which
+# checks out with fetch-depth: 0 specifically so real releases get a real
+# version here instead of silently shipping as "dev".
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+CFLAGS += -DREMOTICA_VERSION=\"$(VERSION)\"
+
 THIRD_PARTY := third_party
 CIVETWEB_DIR := $(THIRD_PARTY)/civetweb
 CJSON_DIR := $(THIRD_PARTY)/cjson
