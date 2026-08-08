@@ -148,6 +148,24 @@ static struct {
 static int probe_camera_device(const char *device_path, char *out_name, size_t out_name_size) {
     int fd = open(device_path, O_RDWR | O_NONBLOCK);
     if (fd < 0) {
+        /* A permission failure is called out specifically because it is
+         * otherwise indistinguishable from "no camera plugged in" — the
+         * scan just reports nothing usable, and the obvious conclusion
+         * is a hardware problem rather than a groups problem.
+         *
+         * How it happens (found on a real install, 2026-08-08): on a
+         * desktop, /dev/video* carries an ACL granting the user of the
+         * active local session access, which is why running from a
+         * terminal works without any group membership at all. A systemd
+         * service user has no session and so gets no such ACL, and needs
+         * to be in the "video" group instead. packaging/install.sh does
+         * that; a hand-rolled install has to as well. */
+        if (errno == EACCES || errno == EPERM) {
+            fprintf(stderr,
+                    "camera: no permission to open %s — the user running Remotica needs to be "
+                    "in the \"video\" group (sudo usermod -a -G video <user>, then restart).\n",
+                    device_path);
+        }
         return 0;
     }
 

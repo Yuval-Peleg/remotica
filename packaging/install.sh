@@ -217,6 +217,21 @@ else
     step "service user" "created '$SERVICE_USER'"
 fi
 
+# /dev/video* is root:video 0660. On a desktop it also carries an ACL for
+# whoever holds the active local session, which is why a camera works when
+# you run Remotica from a terminal — but a service user has no session and
+# so gets no ACL. Without this the webcam is simply never found, and the
+# scan reports "no usable camera", which reads as a hardware fault.
+#
+# Group membership rather than a MODE=0666 udev rule (which is what the
+# serial rule does) on purpose: a webcam has privacy weight a serial port
+# doesn't, and world-readable is the wrong default for one. Same reasoning
+# that makes capture lazy in camera.c.
+if getent group video >/dev/null 2>&1; then
+    usermod -a -G video "$SERVICE_USER"
+    step "camera access" "added '$SERVICE_USER' to the video group"
+fi
+
 install -m 0755 "$SRC/remotica" "$BIN_PATH"
 step "binary" "$BIN_PATH"
 
