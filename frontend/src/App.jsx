@@ -3,7 +3,7 @@ import { Navbar } from "@/components/Navbar";
 import { Dashboard } from "@/pages/Dashboard";
 import { Settings } from "@/pages/Settings";
 import { About } from "@/pages/About";
-import { PlaceholderPage } from "@/pages/Placeholder";
+import { System } from "@/pages/System";
 import { Toaster } from "@/components/ui/sonner";
 
 // Keyed on the pathname so React tears down the old page and mounts the
@@ -16,7 +16,7 @@ function AnimatedRoutes() {
     <div key={location.pathname} className="motion-page">
       <Routes location={location}>
         <Route path="/" element={<Dashboard />} />
-        <Route path="/system" element={<PlaceholderPage title="System" />} />
+        <Route path="/system" element={<System />} />
         <Route path="/settings" element={<Settings />} />
         <Route path="/about" element={<About />} />
       </Routes>

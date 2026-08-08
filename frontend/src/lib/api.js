@@ -50,6 +50,13 @@ export const api = {
   // a printer-database entry or null.
   getPrinterSuggestion: () => requestJson("/api/printer-suggestion"),
 
+  // Host-level status rather than printer status — version, uptime, disk,
+  // and whether this is an installed systemd service. `managed` is false
+  // in a dev checkout, where there's no service to change; setBootStart
+  // 409s in that case rather than pretending to work.
+  getSystem: () => requestJson("/api/system"),
+  setBootStart: (enabled) => postJson("/api/system/boot-start", { enabled }),
+
   uploadFile: (file) =>
     requestJson(`/api/upload?filename=${encodeURIComponent(file.name)}`, {
       method: "POST",
