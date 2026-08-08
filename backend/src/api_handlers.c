@@ -25,6 +25,7 @@
 #include "cJSON.h"
 #include "civetweb.h"
 #include "printer_database.h"
+#include "system_info.h"
 
 /* Maximum size we'll accept for a single JSON request body (jog/temp/
  * profile requests are tiny — a few dozen bytes — so this is generous
@@ -810,6 +811,51 @@ static int files_delete_handler(struct mg_connection *conn, void *cbdata) {
 }
 
 /* ---------------------------------------------------------------------
+ * GET /api/system
+ *
+ * Host-level status, not printer status — what build is running, how
+ * long it's been up, where its data lives, and whether it's an installed
+ * service that will come back after a power cut.
+ * --------------------------------------------------------------------- */
+
+static int system_handler(struct mg_connection *conn, void *cbdata) {
+    AppContext *ctx = (AppContext *)cbdata;
+    const struct mg_request_info *req_info = mg_get_request_info(conn);
+
+    if (strcmp(req_info->request_method, "GET") != 0) {
+        mg_send_http_error(conn, 405, "Only GET is supported here");
+        return 1;
+    }
+
+    cJSON *json = cJSON_CreateObject();
+    cJSON_AddStringToObject(json, "version", REMOTICA_VERSION);
+    cJSON_AddNumberToObject(json, "uptimeSeconds", (double)(time(NULL) - ctx->started_at));
+    cJSON_AddStringToObject(json, "dataDir", ctx->data_dir);
+    cJSON_AddNumberToObject(json, "dataFreeBytes", (double)system_info_free_bytes(ctx->data_dir));
+    cJSON_AddStringToObject(json, "serialPort",
+                            ctx->serial_device != NULL ? ctx->serial_device : "simulator");
+    cJSON_AddBoolToObject(json, "servingFrontend", ctx->web_root != NULL);
+
+    /* "managed" is what the frontend keys off: false means this is a
+     * source checkout with no systemd unit, so there is genuinely
+     * nothing to toggle and the UI shows a disabled control with an
+     * explanation rather than one that silently fails. bootStartEnabled
+     * is omitted entirely (rather than sent as false) when it couldn't
+     * be determined, so the client can't mistake "unknown" for "off". */
+    int managed = system_info_is_managed();
+    cJSON_AddBoolToObject(json, "managed", managed);
+    if (managed) {
+        int enabled = system_info_boot_start_enabled();
+        if (enabled >= 0) {
+            cJSON_AddBoolToObject(json, "bootStartEnabled", enabled);
+        }
+    }
+
+    send_json_and_delete(conn, json);
+    return 1;
+}
+
+/* ---------------------------------------------------------------------
  * Registration
  * --------------------------------------------------------------------- */
 
@@ -830,4 +876,5 @@ void api_handlers_register_all(struct mg_context *ctx, AppContext *app_context) 
     mg_set_request_handler(ctx, "/api/files/content", files_content_handler, app_context);
     mg_set_request_handler(ctx, "/api/files/select", files_select_handler, app_context);
     mg_set_request_handler(ctx, "/api/files/delete", files_delete_handler, app_context);
+    mg_set_request_handler(ctx, "/api/system", system_handler, app_context);
 }

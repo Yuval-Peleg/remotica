@@ -246,6 +246,8 @@ static int spa_fallback_handler(struct mg_connection *conn, void *cbdata) {
  * --------------------------------------------------------------------- */
 
 int main(int argc, char **argv) {
+    const time_t started_at = time(NULL);
+
     /* --- 1. Command-line arguments --- */
 
     /* If --serial <device> is given, we'll talk to a real printer over
@@ -499,6 +501,10 @@ int main(int argc, char **argv) {
         .profile = &profile,
         .profile_path = profile_path,
         .uploads_dir = uploads_dir,
+        .web_root = web_root,
+        .data_dir = data_dir,
+        .serial_device = serial_device,
+        .started_at = started_at,
     };
     api_handlers_register_all(ctx, &app_context);
 

@@ -17,6 +17,8 @@
  * on just by looking at its signature.
  */
 
+#include <time.h>
+
 #include "job_manager.h"
 #include "printer_profile.h"
 #include "printer_state.h"
@@ -29,6 +31,14 @@ typedef struct {
 
     const char *profile_path; /* where printer_profile_save() writes to */
     const char *uploads_dir;  /* where uploaded gcode files are stored */
+
+    /* Reported by GET /api/system. None of these affect printer
+     * behaviour — they exist so the System page can answer "what is this
+     * machine running, and will it come back after a power cut?". */
+    const char *web_root;      /* NULL when not serving a built frontend */
+    const char *data_dir;      /* what free space is reported against */
+    const char *serial_device; /* NULL means the simulator */
+    time_t started_at;         /* for uptime */
 } AppContext;
 
 struct mg_context;
