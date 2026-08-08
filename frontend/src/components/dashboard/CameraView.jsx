@@ -81,6 +81,11 @@ export function CameraView() {
     let cancelled = false;
 
     const poll = () => {
+      // Skipped while backgrounded: it's wasted battery on a phone, and
+      // polling through a screen lock would let frameSeq's timestamps go
+      // stale in a way that reads as a stall the instant you come back.
+      if (document.visibilityState !== "visible") return;
+
       api
         .getCameraInfo()
         .then((data) => {
@@ -122,14 +127,46 @@ export function CameraView() {
     };
   }, []);
 
-  // Rebuilds the stream when there's a camera to rebuild it on. Two ways
-  // in: the <img> errored (the usual one — the backend ends the response
-  // when its capture thread dies), or frames stopped advancing while the
-  // backend says it isn't capturing, which is the same death seen from
-  // the other side if the response happens to stay open.
+  // Reconnect the moment the page comes back, rather than waiting for the
+  // stall detector to notice. Locking and unlocking a phone screen is the
+  // common case: the browser tears the stream down while backgrounded and
+  // does not resume it, so without this the picture sat frozen until the
+  // 4s stall threshold plus the 2s reconnect delay had elapsed — long
+  // enough that it read as "still broken, needs a refresh".
+  //
+  // pageshow as well as visibilitychange because iOS restores a page from
+  // its back/forward cache without ever firing visibilitychange.
+  useEffect(() => {
+    const reconnectNow = () => {
+      if (document.visibilityState !== "visible") return;
+      setStreamBroken(false);
+      lastSeqRef.current = null;
+      lastChangeAtRef.current = Date.now();
+      setStreamKey((key) => key + 1);
+    };
+
+    document.addEventListener("visibilitychange", reconnectNow);
+    window.addEventListener("pageshow", reconnectNow);
+    return () => {
+      document.removeEventListener("visibilitychange", reconnectNow);
+      window.removeEventListener("pageshow", reconnectNow);
+    };
+  }, []);
+
+  // Rebuilds the stream when there's a camera to rebuild it on. Either
+  // the <img> errored, or frames simply stopped arriving.
+  //
+  // Note there is deliberately no `info.streaming === false` condition
+  // here. It used to require that, which meant a stalled picture only
+  // recovered when the *backend* had given up — and the most common
+  // failure isn't that at all: locking a phone screen kills the client's
+  // side of the MJPEG connection while the backend carries on capturing
+  // perfectly happily, so `streaming` stayed true forever and nothing
+  // ever reconnected. The <img> doesn't reliably fire onError in that
+  // case either; the stream just goes quiet. Frames not arriving *here*
+  // is the thing worth acting on, whatever the backend thinks.
   const needsReconnect =
-    info.available &&
-    (streamBroken || (liveStatus === "stalled" && info.streaming === false));
+    info.available && (streamBroken || liveStatus === "stalled");
 
   useEffect(() => {
     if (!needsReconnect) return;

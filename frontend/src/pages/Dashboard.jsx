@@ -19,6 +19,7 @@ import { TemperatureGraph } from "@/components/control/TemperatureGraph";
 import { ConnectionStatus } from "@/components/dashboard/ConnectionStatus";
 import { GcodeDropzone } from "@/components/dashboard/GcodeDropzone";
 import { OnDeviceFiles } from "@/components/dashboard/OnDeviceFiles";
+import { HoldButton } from "@/components/dashboard/HoldButton";
 import { GcodeConsole } from "@/components/dashboard/GcodeConsole";
 import { usePrinterState } from "@/hooks/use-printer-state";
 import { useGcodeFile } from "@/hooks/use-gcode-file";
@@ -163,26 +164,39 @@ export function Dashboard() {
             />
 
             {isPrintActive ? (
-              <div className="flex animate-pop gap-2">
-                <Button
-                  className="flex-1 bg-amber-500 text-amber-950 hover:bg-amber-500/80"
-                  onClick={() =>
-                    (isPaused ? api.printResume() : api.printPause()).catch(
-                      () => {}
-                    )
-                  }
-                >
-                  {isPaused ? <Play /> : <Pause />}
-                  {isPaused ? "Resume" : "Pause"}
-                </Button>
-                <Button
-                  variant="destructive"
-                  className="flex-1"
-                  onClick={() => api.printCancel().catch(() => {})}
-                >
-                  <Square />
-                  Stop
-                </Button>
+              /* Hold-to-confirm, not plain taps: these sit directly in the
+                 scroll path on a phone, and brushing one mid-flick would
+                 pause or abandon a running print. A hold can't be produced
+                 by a moving finger — see HoldButton — and stays faster
+                 than a confirmation dialog for the emergency stop this has
+                 to remain good at. */
+              <div className="flex flex-col gap-1.5">
+                <div className="flex animate-pop gap-2">
+                  <HoldButton
+                    className="flex-1 bg-amber-500 text-amber-950 hover:bg-amber-500/80"
+                    holdLabel={isPaused ? "Resuming…" : "Pausing…"}
+                    onConfirm={() =>
+                      (isPaused ? api.printResume() : api.printPause()).catch(
+                        () => {}
+                      )
+                    }
+                  >
+                    {isPaused ? <Play /> : <Pause />}
+                    {isPaused ? "Resume" : "Pause"}
+                  </HoldButton>
+                  <HoldButton
+                    variant="destructive"
+                    className="flex-1"
+                    holdLabel="Stopping…"
+                    onConfirm={() => api.printCancel().catch(() => {})}
+                  >
+                    <Square />
+                    Stop
+                  </HoldButton>
+                </div>
+                <p className="text-center text-xs text-muted-foreground">
+                  Hold either button to confirm
+                </p>
               </div>
             ) : (
               <Button
