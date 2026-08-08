@@ -94,8 +94,28 @@ static void acquire(void) {
         /* Child. `sleep infinity` is the held process: systemd-inhibit
          * owns the lock for exactly as long as the command it runs, so
          * the lock lives until the parent kills this. */
+        /* "idle", NOT "sleep:idle" — and this distinction is the whole
+         * reason the first version of this silently did nothing.
+         *
+         * polkit's shipped defaults for logind differ between the two:
+         *
+         *   inhibit-block-sleep  allow_any = auth_admin_keep
+         *   inhibit-block-idle   allow_any = yes
+         *
+         * "allow_any" is the branch that applies to a caller with no
+         * login session — which is exactly what this service is, running
+         * as a system user. So asking for the sleep half demanded
+         * interactive admin authentication from a background daemon that
+         * has no agent to answer it, the whole request was refused, and
+         * systemd-inhibit sat there holding nothing while the machine
+         * suspended mid-print.
+         *
+         * Blocking idle alone is also the correct scope, not just the
+         * permitted one: the failure being prevented is the machine
+         * dozing off on its own, and a human deliberately choosing
+         * Suspend was always meant to be honoured. */
         char *const argv[] = {
-            (char *)"systemd-inhibit", (char *)"--what=sleep:idle",
+            (char *)"systemd-inhibit", (char *)"--what=idle",
             (char *)"--who=Remotica",  (char *)"--why=A print is running",
             (char *)"--mode=block",    (char *)"sleep",
             (char *)"infinity",        NULL,

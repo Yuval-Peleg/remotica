@@ -66,20 +66,19 @@ sudoers rules), then uninstall and confirm nothing is left behind and
 
 ## Host power management beyond idle suspend
 
-**The inhibitor does not reliably work, and why is unknown (2026-08-08).**
-A machine running v0.2.0 suspended mid-print anyway. `journalctl -u
-remotica` contains none of power_inhibit.c's log lines — neither the
-"Blocking automatic suspend" success nor the "systemd-inhibit not found"
-fallback — even though journald is capturing the service's stdout, the
-call site is present in the shipped binary, and it sits in the tick loop
-guarded only by the job status. So the code appears never to have run,
-which is not yet explained. Next diagnostic: the System page's Sleep row
-during a print, which reports the same flag without needing the journal.
-Until that's understood, the installer offers to mask the sleep targets
-outright, which is what actually protects a print. Deliberately **not** covered: a human
-choosing Suspend, closing a laptop lid, or the machine losing power.
-Blocking those would mean overriding the owner's explicit intent, so the
-README documents how to disable them instead.
+**Root cause found and fixed (2026-08-08).** The inhibitor never
+registered at all. polkit's shipped logind policy grants
+`inhibit-block-idle` to any caller (`allow_any = yes`) but gates
+`inhibit-block-sleep` behind `auth_admin_keep` — and `allow_any` is the
+branch that applies to a caller with no login session, which is exactly
+what this service is. Asking for `sleep:idle` therefore demanded
+interactive admin authentication from a background daemon with no agent
+to answer it; the request was refused and `systemd-inhibit` sat holding
+nothing while the dashboard reported sleep as blocked. Now it asks for
+`idle` alone, which is both permitted and the correct scope. The code
+also verifies the lock against `systemd-inhibit --list` rather than
+treating a successful fork as success, so this class of silent failure
+reports itself instead of lying.
 
 Also unhandled: what happens *after* an interruption. There's no
 resume-after-power-loss, and no detection on startup that a print was in
