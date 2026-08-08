@@ -59,12 +59,19 @@
 #define LISTEN_PORT "8080"
 
 /* Where the printer profile is persisted, and where uploaded gcode files
- * are stored. Both are relative paths, so run this program with
- * backend/ as the current directory (that's what `make run` and the
- * README instructions do) — see .gitignore, both of these are
- * runtime-generated and intentionally not committed to the repo. */
-#define PROFILE_PATH "data/profile.json"
-#define UPLOADS_DIR "data/uploads"
+ * are stored — both relative to --data-dir.
+ *
+ * --data-dir itself defaults to a relative "data", which is what keeps
+ * the historical behaviour of running this program with backend/ as the
+ * current directory (`make run`, run.sh, the from-source instructions in
+ * the README). Both are runtime-generated and gitignored on purpose.
+ *
+ * An installed systemd service passes an absolute --data-dir instead: it
+ * runs as an unprivileged user whose working directory is /, where a
+ * relative path would put the profile somewhere it can't write. */
+#define DEFAULT_DATA_DIR "data"
+#define PROFILE_FILENAME "profile.json"
+#define UPLOADS_SUBDIR "uploads"
 
 /* How often the background tick thread wakes up to advance the
  * simulation/poll the real printer and broadcast state. 300ms is
@@ -228,6 +235,10 @@ int main(int argc, char **argv) {
      * the dashboard on 8080. */
     const char *listen_port = LISTEN_PORT;
 
+    /* --data-dir <dir> is where the profile and uploaded gcode live. See
+     * DEFAULT_DATA_DIR above for why the default is relative. */
+    const char *data_dir = DEFAULT_DATA_DIR;
+
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--serial") == 0 && i + 1 < argc) {
             serial_device = argv[i + 1];
@@ -235,8 +246,16 @@ int main(int argc, char **argv) {
         } else if (strcmp(argv[i], "--port") == 0 && i + 1 < argc) {
             listen_port = argv[i + 1];
             i++;
+        } else if (strcmp(argv[i], "--data-dir") == 0 && i + 1 < argc) {
+            data_dir = argv[i + 1];
+            i++;
         }
     }
+
+    char profile_path[512];
+    char uploads_dir[512];
+    snprintf(profile_path, sizeof(profile_path), "%s/%s", data_dir, PROFILE_FILENAME);
+    snprintf(uploads_dir, sizeof(uploads_dir), "%s/%s", data_dir, UPLOADS_SUBDIR);
 
     signal(SIGINT, handle_stop_signal);
     signal(SIGTERM, handle_stop_signal);
@@ -247,7 +266,7 @@ int main(int argc, char **argv) {
     printer_state_init(&state);
 
     PrinterProfile profile;
-    printer_profile_load(&profile, PROFILE_PATH);
+    printer_profile_load(&profile, profile_path);
 
     ConsoleLog console;
     console_log_init(&console);
@@ -343,7 +362,7 @@ int main(int argc, char **argv) {
     }
 
     if (driver->connect(driver) == 0) {
-        try_auto_detect_profile(&state, &profile, PROFILE_PATH);
+        try_auto_detect_profile(&state, &profile, profile_path);
     } else {
         if (serial_device == NULL) {
             /* The simulator's connect() never actually fails today, so
@@ -406,8 +425,8 @@ int main(int argc, char **argv) {
         .state = &state,
         .driver = driver,
         .profile = &profile,
-        .profile_path = PROFILE_PATH,
-        .uploads_dir = UPLOADS_DIR,
+        .profile_path = profile_path,
+        .uploads_dir = uploads_dir,
     };
     api_handlers_register_all(ctx, &app_context);
 
@@ -430,7 +449,7 @@ int main(int argc, char **argv) {
     pthread_t reconnect_thread;
     int reconnect_thread_started = 0;
     ReconnectThreadArgs reconnect_args = {
-        .driver = driver, .profile = &profile, .profile_path = PROFILE_PATH};
+        .driver = driver, .profile = &profile, .profile_path = profile_path};
     if (serial_device != NULL) {
         pthread_create(&reconnect_thread, NULL, reconnect_thread_main, &reconnect_args);
         reconnect_thread_started = 1;
