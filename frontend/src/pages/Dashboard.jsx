@@ -111,11 +111,17 @@ export function Dashboard() {
   const state = !connected ? "Disconnected" : JOB_STATUS_LABELS[job.status];
 
   const printTime = formatDurationShort(printTimeSeconds);
-  const printTimeLeft = formatDurationShort(
+  // Deliberately not formatDurationShort's own output here: it returns the
+  // string "Unknown" rather than null when it can't estimate, which would
+  // render as "Progress (Time left: Unknown)" — noise next to a bar that
+  // is perfectly readable on its own. Known-ness is decided before
+  // formatting so the whole parenthetical can be dropped.
+  const printTimeLeft =
     printTimeSeconds != null
-      ? Math.max(0, printTimeSeconds * (1 - job.progress / 100))
-      : null
-  );
+      ? formatDurationShort(
+          Math.max(0, printTimeSeconds * (1 - job.progress / 100))
+        )
+      : null;
 
   // Print-finished popup: fires once per completion, when the job goes
   // printing -> ready with progress essentially at 100%. A driver failure
@@ -220,11 +226,19 @@ export function Dashboard() {
                     title={hasFile ? job.filename : undefined}
                   />
                   <StatRow label="Print time" value={printTime} />
-                  <StatRow label="Time left" value={printTimeLeft} />
 
                   <div className="flex flex-col gap-1.5 pt-4">
-                    <div className="flex items-center justify-between text-xs text-muted-foreground">
-                      <span>Progress</span>
+                    <div className="flex items-center justify-between gap-3 text-xs text-muted-foreground">
+                      {/* Time remaining reads better attached to the bar
+                          it describes than as its own stat row. The
+                          parenthetical is dropped entirely when the
+                          estimate is unknown — "(Time left: Unknown)"
+                          is noise, and the bar is still meaningful
+                          without it. */}
+                      <span className="min-w-0 truncate">
+                        Progress
+                        {printTimeLeft ? ` (Time left: ${printTimeLeft})` : ""}
+                      </span>
                       <span className="tabular-nums">
                         {Math.round(job.progress)}%
                       </span>
