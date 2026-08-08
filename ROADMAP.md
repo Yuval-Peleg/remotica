@@ -33,13 +33,19 @@ actual mmap-based V4L2 capture loop and MJPEG streaming
 (`camera_stream_handler`) have not been checked against real frame
 capture — see the warning in `camera.h`.
 
-## Single-process deployment
+## Installer not yet verified on a clean machine
 
-Frontend and backend still run as two separate processes (`run.sh`'s Vite
-dev server + the backend, talking over a dev proxy) instead of the backend
-serving the built `frontend/dist/` directly, which is the intended final
-deployment model (see `CLAUDE.md`'s "Deployment model" section). Needs
-civetweb's static-file serving wired up to a production frontend build.
+The single-process build, the systemd unit, the installer and the
+uninstaller are all written and their pieces individually checked (the
+packaged payload runs and serves the dashboard; the sudoers file passes
+`visudo -c`; the release tarball assembles and verifies) — but the
+**install has never been run end to end on a clean machine**, because
+doing that on the development machine would drop a service and a sudoers
+file over the working setup. Still outstanding: install on a fresh
+Ubuntu box, reboot, confirm the dashboard comes back with nobody logged
+in, toggle start-on-boot from the System page (the only real test of the
+sudoers rules), then uninstall and confirm nothing is left behind and
+`sudo` still works.
 
 ## Detecting a printer going away mid-session
 

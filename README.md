@@ -39,10 +39,76 @@ author accepts no liability for damage, injury, or loss arising from the use
 of this software, at any stage of its development. **Use entirely at your
 own risk.**
 
-## Running it
+## Installation
 
-Linux only for now (headless-friendly — no desktop environment needed). You
-need a C toolchain and Node:
+Linux only for now, and headless-friendly — the machine wired to your
+printer needs no desktop environment, and you never have to sit in front
+of it.
+
+On that machine:
+
+```sh
+curl -fsSL https://github.com/Yuval-Peleg/remotica/releases/latest/download/install.sh | sudo sh
+```
+
+That downloads a prebuilt binary (x86_64 or arm64), verifies its
+checksum, installs it as a systemd service, and prints the address to
+open from your phone or laptop. There's no toolchain to install, no Node,
+and no copy of this repository on that machine.
+
+It asks one question — whether Remotica should start automatically when
+the machine boots — and you can change your mind later from the
+dashboard's **System** page.
+
+What it puts on the machine:
+
+| Path | What it is |
+| --- | --- |
+| `/usr/local/bin/remotica` | the binary |
+| `/usr/local/bin/remotica-uninstall` | the uninstaller |
+| `/usr/local/share/remotica/web/` | the dashboard |
+| `/etc/systemd/system/remotica.service` | the service |
+| `/etc/sudoers.d/remotica` | see below |
+| `/etc/udev/rules.d/99-remotica-serial.rules` | USB serial access |
+| `/var/lib/remotica/` | your printer profile and uploaded G-code |
+
+Remotica runs as its own unprivileged `remotica` user, not as root. The
+one thing it needs elevated permission for is the start-on-boot toggle,
+so the sudoers file grants that user exactly three `systemctl` command
+lines against exactly this service — nothing else. A bug in Remotica
+can't become root.
+
+**Checking on it:**
+
+```sh
+systemctl status remotica      # is it running?
+journalctl -u remotica -f      # follow the logs
+```
+
+**Updating:** re-run the install command. Your printer profile and
+uploaded files are kept, as is your start-on-boot setting.
+
+**Uninstalling:**
+
+```sh
+sudo remotica-uninstall            # removes everything except your data
+sudo remotica-uninstall --purge    # also deletes /var/lib/remotica
+```
+
+Plain `remotica-uninstall` deliberately leaves `/var/lib/remotica` alone
+— that's your printer profile and every G-code file you've uploaded — and
+tells you where it is.
+
+> **Anyone on your network who opens the dashboard can control your
+> printer.** Remotica has no login of any kind. Only run it on a network
+> you trust.
+
+## Running from source (development)
+
+This is the development path — for hacking on Remotica, not for putting
+it on the machine next to your printer. Use the installer above for that.
+
+You need a C toolchain and Node:
 
 ```sh
 sudo apt-get install build-essential
@@ -82,10 +148,11 @@ supposed to just sit there and run:
 **Frontend** — React + Vite + Tailwind CSS +
 [shadcn/ui](https://ui.shadcn.com/), dark-only sage-on-charcoal theme.
 
-Frontend and backend are meant to end up as a single process, with the
-backend serving the built frontend directly. That isn't wired up yet — today
-`run.sh` starts them as two processes with a dev proxy in between. See
-[`ROADMAP.md`](./ROADMAP.md).
+An installed Remotica is a **single process**: the backend serves the
+built frontend itself, so there's nothing else to run and no web server
+to configure. During development the two halves are still split, with
+Vite serving the frontend for hot reload and proxying the API — that's
+what `run.sh` starts.
 
 ## License
 
