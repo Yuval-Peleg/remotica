@@ -75,6 +75,15 @@ function translateSent(text) {
   if (text === "M82") return "Switch extruder to absolute positioning";
   if (text === "M83") return "Switch extruder to relative positioning";
 
+  // Sent unnumbered at connect, and again after a failed line, to
+  // resynchronise the line numbering — see resync_line_numbers() in
+  // transport_serial.c. Cryptic enough to be worth naming, and it now
+  // shows up in the console whenever a resend recovery happens.
+  const setLineNumber = text.match(/^M110(?:\s+N(-?\d+))?$/);
+  if (setLineNumber) {
+    return `Reset command numbering to ${setLineNumber[1] ?? 0}`;
+  }
+
   const move = text.match(/^(G0|G1)((?:\s+[XYZEF]-?[\d.]+)+)$/);
   if (move) return translateMove(move[1], move[2]);
 
@@ -128,12 +137,53 @@ function translateReceived(text) {
     return "Acknowledged — ready for the next command";
   }
 
+  // The other half of the checksum protocol: the printer saw a corrupted
+  // or out-of-sequence line and wants it again. Worth naming, because a
+  // run of these is the visible symptom of a bad USB cable.
+  const resend = text.match(/^Resend:\s*(\d+)/i);
+  if (resend) {
+    return `Line ${resend[1]} arrived corrupted — printer asked for it again`;
+  }
+
+  // Marlin's host-keepalive during a long move. Reads as a stall
+  // otherwise; it's the printer explicitly saying it's still working.
+  if (/^echo:\s*busy:\s*processing/i.test(text)) {
+    return "Still working on the previous command";
+  }
+
   return null;
+}
+
+// Strips the RepRap line-number prefix and checksum suffix that
+// transport_serial.c wraps around every line of a streamed print — so
+// "N4213 G1 X10.5 Y20.2 F1200*45" is matched below as "G1 X10.5 Y20.2
+// F1200".
+//
+// This matters more than it looks. Every matcher in translateSent is
+// anchored (exact equality, or /^...$/), so the N-prefix broke the start
+// and the checksum broke the end: during a real print — the one time
+// this console is genuinely useful — not a single streamed line
+// translated, and Plain English appeared to do nothing at all. Jog, home
+// and temperature commands were unaffected, because those go through the
+// non-checksummed path (send_and_wait_for_ok), which is why this looks
+// fine against the simulator.
+//
+// Deliberately stripped here rather than in the backend: the console's
+// raw view is a protocol view, and the real wire bytes — line numbers
+// and checksums included — are exactly what you need when diagnosing a
+// resend storm or the stale-line-number class of bug this driver has
+// already hit once. So the framing stays visible with the toggle off,
+// and is only removed for the purpose of describing the command.
+function stripLineFraming(text) {
+  return text
+    .replace(/^N\d+\s+/, "")
+    .replace(/\*\d+$/, "")
+    .trim();
 }
 
 export function translateGcodeLine(text, direction) {
   const trimmed = text.trim();
   return direction === "sent"
-    ? translateSent(trimmed)
+    ? translateSent(stripLineFraming(trimmed))
     : translateReceived(trimmed);
 }
