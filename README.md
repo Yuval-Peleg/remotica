@@ -53,6 +53,17 @@ Remotica runs as an unprivileged `remotica` user, not root. It needs elevated pe
 3. **Home the printer.** Movement stays blocked until it knows where the head is.
 4. Upload G-code and print.
 
+## Start & end G-code
+
+**Settings → Start & end G-code.** Two boxes that run before and after every print, around the sliced file's own start and end blocks — a purge line, a nozzle wipe, parking the head.
+
+Warnings appear as you type (missing `G28`, heaters left on, typos) but never stop you saving — Remotica doesn't know your machine's custom commands.
+
+Two things worth knowing:
+
+- **End G-code doesn't run when you cancel.** A cancel does the fixed safety sequence instead: heaters off, fan off, Z lift, steppers released.
+- **A failing line aborts the print**, exactly like a bad line in the file would.
+
 ## Keeping the machine awake
 
 Remotica blocks automatic suspend while a print is running — visible on the **System** page. This matters: if the host suspends, the printer *doesn't stop*. It holds its heaters at the last commanded temperature with nothing supervising it.
