@@ -33,7 +33,7 @@ function commandsIn(text) {
 
 // Returns [{ line, message }], line being 1-based for display. `position`
 // is "start" or "end" — several checks only make sense for one of them.
-export function validateGcode(text, { position } = {}) {
+export function validateGcode(text, { position, maxZMm } = {}) {
   const warnings = [];
   const lines = text.split("\n");
 
@@ -64,6 +64,49 @@ export function validateGcode(text, { position } = {}) {
       warnings.push({
         line: index + 1,
         message: "M112 halts the printer until it is reset by hand",
+      });
+    }
+  });
+
+  // Z-height checks. Whether "G1 Z20" means a 20mm height or a 20mm lift
+  // depends on the G90/G91 positioning mode in force, so this walks the
+  // snippet tracking that mode as it goes.
+  //
+  // Remotica cannot resolve a relative lift itself: the final Z depends
+  // on how tall the print ended up, and the driver doesn't track position
+  // from the streamed file (there's no firmware-agnostic way to query it
+  // back mid-print — see transport_serial.c). So this warns rather than
+  // computing, and never rewrites what the user typed: silently clamping
+  // someone's lift would mean their end block isn't what actually runs.
+  let mode = null; /* "absolute" | "relative" | null = not set here */
+  lines.forEach((raw, index) => {
+    const line = stripComment(raw);
+    if (!line) return;
+
+    const words = line.split(/\s+/);
+    const command = words[0].toUpperCase();
+    if (command === "G90") mode = "absolute";
+    if (command === "G91") mode = "relative";
+    if (command !== "G0" && command !== "G1") return;
+
+    const zWord = words.find((w) => /^[Zz]-?\d*\.?\d+$/.test(w));
+    if (!zWord) return;
+    const z = Number(zWord.slice(1));
+
+    if (mode === "relative" && z > 0 && position === "end") {
+      warnings.push({
+        line: index + 1,
+        message: `Lifts Z by ${z}mm — on a tall print this can exceed the printer's maximum height. Most firmware clamps it; check yours with M211.`,
+      });
+    } else if (mode === "absolute" && maxZMm && z > maxZMm) {
+      warnings.push({
+        line: index + 1,
+        message: `Z${z} is above this printer's maximum of ${maxZMm}mm`,
+      });
+    } else if (mode === null) {
+      warnings.push({
+        line: index + 1,
+        message: `No G90/G91 before this, so whether Z${z} is a height or a lift depends on how the print file ended`,
       });
     }
   });

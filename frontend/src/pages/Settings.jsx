@@ -201,11 +201,15 @@ export function Settings() {
     };
   }, []);
 
+  // maxZMm comes from the confirmed profile, so "Z260 is above this
+  // printer's maximum" can name the real number rather than a guess.
   const startWarnings = validateGcode(snippets?.startGcode ?? "", {
     position: "start",
+    maxZMm: profile?.maxZMm,
   });
   const endWarnings = validateGcode(snippets?.endGcode ?? "", {
     position: "end",
+    maxZMm: profile?.maxZMm,
   });
   const hasSnippets = Boolean(
     snippets?.startGcode?.trim() || snippets?.endGcode?.trim()
