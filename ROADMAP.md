@@ -55,6 +55,19 @@ in, toggle start-on-boot from the System page (the only real test of the
 sudoers rules), then uninstall and confirm nothing is left behind and
 `sudo` still works.
 
+## Host power management beyond idle suspend
+
+Remotica takes a logind inhibitor while printing, so automatic idle
+suspend can't interrupt a print (added 2026-08-08, after a real print was
+stopped an hour in by exactly that). Deliberately **not** covered: a human
+choosing Suspend, closing a laptop lid, or the machine losing power.
+Blocking those would mean overriding the owner's explicit intent, so the
+README documents how to disable them instead.
+
+Also unhandled: what happens *after* an interruption. There's no
+resume-after-power-loss, and no detection on startup that a print was in
+progress when the backend last died — the job state simply starts fresh.
+
 ## Detecting a printer going away mid-session
 
 The reconnect thread added 2026-08-01 covers "no printer at startup, plug

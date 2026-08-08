@@ -25,6 +25,7 @@
 #include "cJSON.h"
 #include "civetweb.h"
 #include "printer_database.h"
+#include "power_inhibit.h"
 #include "system_info.h"
 
 /* Maximum size we'll accept for a single JSON request body (jog/temp/
@@ -888,6 +889,11 @@ static int system_handler(struct mg_connection *conn, void *cbdata) {
      * is omitted entirely (rather than sent as false) when it couldn't
      * be determined, so the client can't mistake "unknown" for "off". */
     int managed = system_info_is_managed();
+    /* Reported so the dashboard can show that suspend is genuinely
+     * being blocked during a print, rather than the user having to take
+     * it on trust after having been burned by it once. */
+    cJSON_AddBoolToObject(json, "sleepInhibited", power_inhibit_is_held());
+
     cJSON_AddBoolToObject(json, "managed", managed);
     if (managed) {
         int enabled = system_info_boot_start_enabled();

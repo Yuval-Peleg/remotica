@@ -103,6 +103,32 @@ tells you where it is.
 > printer.** Remotica has no login of any kind. Only run it on a network
 > you trust.
 
+### Keeping the machine awake
+
+Remotica blocks automatic suspend for as long as a print is running, so a
+machine nobody has touched for hours won't doze off mid-print. You can
+see this on the dashboard's **System** page while printing.
+
+This matters more than a ruined print: if the host suspends, the printer
+doesn't stop — it holds its heaters at the last commanded temperature
+with nothing supervising it until someone wakes the machine.
+
+What Remotica does **not** override, deliberately, is a human choosing to
+suspend, or a laptop lid being closed. If you want the machine never to
+sleep at all:
+
+```sh
+# Desktop Ubuntu (GNOME), as the logged-in user:
+gsettings set org.gnome.settings-daemon.plugins.power   sleep-inactive-ac-type 'nothing'
+
+# Any machine, including headless — disables suspend entirely:
+sudo systemctl mask sleep.target suspend.target   hibernate.target hybrid-sleep.target
+```
+
+A laptop being used as the printer PC also needs its lid-close behaviour
+changed — set `HandleLidSwitch=ignore` in `/etc/systemd/logind.conf` and
+`sudo systemctl restart systemd-logind`.
+
 ## Running from source (development)
 
 This is the development path — for hacking on Remotica, not for putting

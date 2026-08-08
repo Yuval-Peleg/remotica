@@ -51,6 +51,7 @@
 #include "job_manager.h"
 #include "printer_database.h"
 #include "printer_profile.h"
+#include "power_inhibit.h"
 #include "printer_state.h"
 #include "transport.h"
 #include "transport_serial.h"
@@ -114,6 +115,21 @@ static void *tick_thread_main(void *arg) {
     while (!s_stop_requested) {
         args->driver->tick(args->driver);
         ws_broadcaster_send_state(args->broadcaster, args->state);
+
+        /* Driven from the tick rather than hooked into job_manager's
+         * start/stop paths: a print can end in a lot of ways (finished,
+         * cancelled, driver failure, printer vanished), and missing one
+         * of them would leave suspend blocked forever. Re-deriving it
+         * from the job status every tick can't drift, and the call is a
+         * no-op when nothing changed.
+         *
+         * Paused counts as active on purpose — a paused print is still
+         * a hot printer holding a nozzle over a part. */
+        printer_state_lock(args->state);
+        int job_active = (args->state->job.status == JOB_STATUS_PRINTING ||
+                          args->state->job.status == JOB_STATUS_PAUSED);
+        printer_state_unlock(args->state);
+        power_inhibit_set(job_active);
 
         usleep(TICK_INTERVAL_MS * 1000);
     }
@@ -614,6 +630,11 @@ int main(int argc, char **argv) {
      *    first — see send_abort_safety_sequence in job_manager.c).
      * 4. Only now is nothing else using the connection, so it's safe to
      *    close. */
+    /* Before anything else in teardown: this holds a child process, and
+     * leaving it alive would keep the machine's suspend blocked after
+     * Remotica has exited. */
+    power_inhibit_shutdown();
+
     camera_shutdown();
     mg_stop(ctx);
     job_manager_shutdown();

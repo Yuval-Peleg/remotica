@@ -1,6 +1,14 @@
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
-import { Cpu, FolderOpen, HardDrive, Power, Timer, Usb } from "lucide-react";
+import {
+  Cpu,
+  FolderOpen,
+  HardDrive,
+  Moon,
+  Power,
+  Timer,
+  Usb,
+} from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Switch } from "@/components/ui/switch";
 import { api } from "@/lib/api";
@@ -151,6 +159,19 @@ export function System() {
                 icon={HardDrive}
                 label="Storage"
                 value={formatBytes(info.dataFreeBytes)}
+              />
+              {/* Shown because this machine suspending mid-print doesn't
+                  just ruin the print — the printer keeps its heaters at
+                  the last commanded temperature with nothing supervising
+                  it. Worth being able to see it's actually being held. */}
+              <StatRow
+                icon={Moon}
+                label="Sleep"
+                value={
+                  info.sleepInhibited
+                    ? "Blocked — a print is running"
+                    : "Allowed while idle"
+                }
               />
             </CardContent>
           </Card>
