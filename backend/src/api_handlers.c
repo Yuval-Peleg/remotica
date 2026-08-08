@@ -856,6 +856,60 @@ static int system_handler(struct mg_connection *conn, void *cbdata) {
 }
 
 /* ---------------------------------------------------------------------
+ * POST /api/system/boot-start   {"enabled": true|false}
+ *
+ * The one endpoint that reaches outside Remotica and changes something
+ * about the host machine — see system_info.h for how the privilege to
+ * do that is granted, and how narrowly.
+ * --------------------------------------------------------------------- */
+
+static int boot_start_handler(struct mg_connection *conn, void *cbdata) {
+    (void)cbdata;
+    const struct mg_request_info *req_info = mg_get_request_info(conn);
+
+    if (strcmp(req_info->request_method, "POST") != 0) {
+        mg_send_http_error(conn, 405, "Only POST is supported here");
+        return 1;
+    }
+
+    if (!system_info_is_managed()) {
+        mg_send_http_error(conn, 409,
+                           "Not running as an installed service, so there is no boot "
+                           "behaviour to change");
+        return 1;
+    }
+
+    cJSON *json = read_json_body(conn);
+    if (json == NULL) {
+        return 1;
+    }
+
+    cJSON *enabled = cJSON_GetObjectItem(json, "enabled");
+    if (!cJSON_IsBool(enabled)) {
+        cJSON_Delete(json);
+        mg_send_http_error(conn, 400, "Expected {\"enabled\": true|false}");
+        return 1;
+    }
+    int want_enabled = cJSON_IsTrue(enabled);
+    cJSON_Delete(json);
+
+    /* systemctl's own output is forwarded to the client deliberately
+     * rather than flattened to "failed". The realistic failure here is a
+     * sudoers rule that no longer matches — a renamed unit, a partial
+     * install, a distro with systemctl somewhere other than /usr/bin —
+     * and that is completely invisible from the UI unless the actual
+     * error text comes back. */
+    char err[256];
+    if (!system_info_set_boot_start(want_enabled, err, sizeof(err))) {
+        mg_send_http_error(conn, 500, "systemctl failed: %s", err[0] != '\0' ? err : "no output");
+        return 1;
+    }
+
+    send_ok(conn);
+    return 1;
+}
+
+/* ---------------------------------------------------------------------
  * Registration
  * --------------------------------------------------------------------- */
 
@@ -877,4 +931,5 @@ void api_handlers_register_all(struct mg_context *ctx, AppContext *app_context) 
     mg_set_request_handler(ctx, "/api/files/select", files_select_handler, app_context);
     mg_set_request_handler(ctx, "/api/files/delete", files_delete_handler, app_context);
     mg_set_request_handler(ctx, "/api/system", system_handler, app_context);
+    mg_set_request_handler(ctx, "/api/system/boot-start", boot_start_handler, app_context);
 }
