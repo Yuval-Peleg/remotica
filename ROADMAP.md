@@ -66,9 +66,17 @@ sudoers rules), then uninstall and confirm nothing is left behind and
 
 ## Host power management beyond idle suspend
 
-Remotica takes a logind inhibitor while printing, so automatic idle
-suspend can't interrupt a print (added 2026-08-08, after a real print was
-stopped an hour in by exactly that). Deliberately **not** covered: a human
+**The inhibitor does not reliably work, and why is unknown (2026-08-08).**
+A machine running v0.2.0 suspended mid-print anyway. `journalctl -u
+remotica` contains none of power_inhibit.c's log lines — neither the
+"Blocking automatic suspend" success nor the "systemd-inhibit not found"
+fallback — even though journald is capturing the service's stdout, the
+call site is present in the shipped binary, and it sits in the tick loop
+guarded only by the job status. So the code appears never to have run,
+which is not yet explained. Next diagnostic: the System page's Sleep row
+during a print, which reports the same flag without needing the journal.
+Until that's understood, the installer offers to mask the sleep targets
+outright, which is what actually protects a print. Deliberately **not** covered: a human
 choosing Suspend, closing a laptop lid, or the machine losing power.
 Blocking those would mean overriding the owner's explicit intent, so the
 README documents how to disable them instead.

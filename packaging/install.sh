@@ -33,6 +33,8 @@ DATA_DIR="/var/lib/remotica"
 UNIT_PATH="/etc/systemd/system/$UNIT_NAME"
 SUDOERS_PATH="/etc/sudoers.d/remotica"
 UDEV_PATH="/etc/udev/rules.d/99-remotica-serial.rules"
+SLEEP_MARKER="/usr/local/share/remotica/.sleep-masked-by-remotica"
+SLEEP_TARGETS="sleep.target suspend.target hibernate.target hybrid-sleep.target"
 PORT=8080
 
 INTERACTIVE=1
@@ -105,6 +107,15 @@ do_uninstall() {
     if id -u "$SERVICE_USER" >/dev/null 2>&1; then
         userdel "$SERVICE_USER" 2>/dev/null || true
         step "service user" "removed"
+    fi
+
+    # Only undone if this installer is what masked them — someone who had
+    # already disabled sleep for their own reasons keeps that.
+    if [ -f "$SLEEP_MARKER" ]; then
+        # shellcheck disable=SC2086
+        systemctl unmask $SLEEP_TARGETS >/dev/null 2>&1 || true
+        rm -f "$SLEEP_MARKER"
+        step "sleep" "re-enabled"
     fi
 
     [ -f "$BIN_PATH" ] && rm -f "$BIN_PATH" && step "binary" "removed"
@@ -313,6 +324,37 @@ elif [ "$INTERACTIVE" = 1 ]; then
     esac
 else
     step "start on boot" "off (--no-interactive) — enable it from the System page"
+fi
+
+# A machine that suspends mid-print doesn't just lose the print: the
+# printer keeps its heaters at the last commanded temperature with nothing
+# supervising it. Remotica takes a logind inhibitor while printing, but
+# that has been observed failing to prevent a real suspend, so this offers
+# the blunt instrument as well. Opt-in, because refusing to let someone's
+# computer sleep is not a decision to make for them silently.
+if [ -f "$SLEEP_MARKER" ]; then
+    step "sleep" "already disabled by a previous install"
+elif [ "$INTERACTIVE" = 1 ]; then
+    say ""
+    say "  If this PC suspends during a print, the print stops but the"
+    say "  printer's heaters do not."
+    printf 'Stop this machine sleeping altogether? [Y/n] '
+    read -r reply
+    case "${reply:-Y}" in
+    [Yy]*)
+        # shellcheck disable=SC2086
+        if systemctl mask $SLEEP_TARGETS >/dev/null 2>&1; then
+            mkdir -p "$(dirname "$SLEEP_MARKER")"
+            : >"$SLEEP_MARKER"
+            step "sleep" "disabled (remotica-uninstall puts it back)"
+        else
+            step "sleep" "could not disable — see the README"
+        fi
+        ;;
+    *) step "sleep" "left alone — see the README if a print gets interrupted" ;;
+    esac
+else
+    step "sleep" "left alone (--no-interactive) — see the README"
 fi
 
 systemctl restart "$UNIT_NAME"

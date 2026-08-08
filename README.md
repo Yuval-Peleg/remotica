@@ -66,9 +66,11 @@ Two things worth knowing:
 
 ## Keeping the machine awake
 
-Remotica blocks automatic suspend while a print is running — visible on the **System** page. This matters: if the host suspends, the printer *doesn't stop*. It holds its heaters at the last commanded temperature with nothing supervising it.
+If the host suspends, the printer *doesn't stop* — it holds its heaters at the last commanded temperature with nothing supervising it.
 
-It deliberately does **not** override a human choosing Suspend, or a closing laptop lid. To disable sleep entirely:
+The installer offers to disable sleep on this machine, which is the reliable fix and what a dedicated printer PC wants. `remotica-uninstall` puts it back.
+
+Remotica also takes a systemd inhibitor while printing (shown on the **System** page), but **don't rely on that alone** — it has been observed failing to prevent a real suspend, and the cause isn't yet understood. If you skipped the installer's offer:
 
 ```sh
 # Desktop Ubuntu (GNOME), as the logged-in user:
