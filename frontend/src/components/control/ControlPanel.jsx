@@ -52,12 +52,18 @@ export function ControlPanel({
     jog("E", deltaMm);
   };
 
-  // Not a Remotica restriction — Marlin and most other firmware refuse
-  // ordinary moves until a G28 has run, because before that the printer
-  // genuinely doesn't know where the head is. Without saying so, a jog
-  // just silently does nothing and looks like Remotica being broken. The
-  // controls are deliberately left enabled: the firmware is the authority
-  // here, and some machines will happily move without homing.
+  // Blocks XY and Z movement until the printer has been homed, because
+  // until then the firmware genuinely doesn't know where the head is and
+  // a move goes toward an unknown endstop. Most firmware refuses this
+  // anyway (Marlin's NO_MOTION_BEFORE_HOMING), but relying on that makes
+  // the outcome depend on how each machine happens to be configured, and
+  // a silent no-op looks like Remotica being broken rather than the
+  // printer protecting itself. The backend enforces the same rule.
+  //
+  // Two things stay available on purpose: homing itself (obviously — it's
+  // what clears this), and the extruder, since E has no position to be
+  // wrong about and loading filament before homing is normal. Temperature
+  // is untouched for the same reason.
   const needsHoming =
     connected && isProfileConfigured && !isPrintActive && !homed;
 
@@ -97,6 +103,7 @@ export function ControlPanel({
             onHome={handleHome}
             homing={homing}
             homed={homed}
+            jogBlocked={needsHoming}
           />
         </div>
 
@@ -106,6 +113,8 @@ export function ControlPanel({
               label="Z"
               valueLabel={`${position.z.toFixed(1)}mm`}
               onJog={jogZ}
+              disabled={needsHoming}
+              disabledReason="Home the printer before moving it"
             />
             <AxisRail
               label="E"

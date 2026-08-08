@@ -236,6 +236,33 @@ static int jog_handler(struct mg_connection *conn, void *cbdata) {
         return 1;
     }
 
+    /* Refuse to move an axis whose position the printer doesn't know.
+     * Most firmware (Marlin's NO_MOTION_BEFORE_HOMING) already refuses
+     * this, but relying on that means the outcome depends on how each
+     * machine happens to be configured — and on a machine where it's
+     * disabled, a jog from an unknown position is a move toward an
+     * unknown endstop. Enforced here as well as in the UI, for the same
+     * reason as the cold-extrude check above: a backend shouldn't trust
+     * a frontend-only check for something with a physical consequence.
+     *
+     * E is deliberately exempt. Extruder moves have no position to be
+     * wrong about (there's no endstop to crash into and no build volume
+     * to leave), and loading or unloading filament before homing is a
+     * normal thing to want to do. The cold-extrude check below is what
+     * guards E. */
+    if (axis != 'E') {
+        printer_state_lock(ctx->state);
+        int homed = ctx->state->homed;
+        printer_state_unlock(ctx->state);
+
+        if (!homed) {
+            mg_send_http_error(conn, 409,
+                               "Home the printer before moving it — it doesn't know where "
+                               "the head is yet");
+            return 1;
+        }
+    }
+
     /* E (the extruder) is a special case: real printers refuse to
      * extrude cold filament (it can jam or strip the drive gear), so we
      * enforce the same rule the frontend's ControlPanel.jsx already does

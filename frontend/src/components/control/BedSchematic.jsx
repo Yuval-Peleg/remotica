@@ -49,6 +49,7 @@ export function BedSchematic({
   onHome,
   homing = false,
   homed = false,
+  jogBlocked = false,
 }) {
   const areaRef = useRef(null);
   const [dragging, setDragging] = useState(false);
@@ -114,6 +115,14 @@ export function BedSchematic({
     }
 
     lastTapRef.current = { time: now, x: e.clientX, y: e.clientY };
+
+    // Jogging is blocked until the printer is homed, but double-tap to
+    // home deliberately still works — this is the control that clears
+    // the block, so disabling the whole surface would strand the user
+    // on the one gesture they need. Recorded the tap above first, so
+    // the second tap of a double-tap is still recognised.
+    if (jogBlocked) return;
+
     dragStartPositionRef.current = position;
     e.currentTarget.setPointerCapture(e.pointerId);
     setDragging(true);
@@ -205,7 +214,11 @@ export function BedSchematic({
             onPointerMove={handlePointerMove}
             onPointerUp={commit}
             onPointerCancel={commit}
-            className="relative aspect-square w-full flex-1 touch-none cursor-crosshair rounded-lg border border-border bg-secondary/40 bg-[linear-gradient(to_right,var(--color-border)_1px,transparent_1px),linear-gradient(to_bottom,var(--color-border)_1px,transparent_1px)]"
+            className={cn(
+              "relative aspect-square w-full flex-1 touch-none rounded-lg border border-border bg-secondary/40 bg-[linear-gradient(to_right,var(--color-border)_1px,transparent_1px),linear-gradient(to_bottom,var(--color-border)_1px,transparent_1px)]",
+              jogBlocked ? "cursor-not-allowed opacity-50" : "cursor-crosshair"
+            )}
+            title={jogBlocked ? "Home the printer before moving it" : undefined}
             style={{
               backgroundSize: `${100 / gridDivisions}% ${100 / gridDivisions}%`,
             }}
@@ -225,7 +238,11 @@ export function BedSchematic({
               {displayPosition.y.toFixed(1)}mm
             </span>
           </p>
-          <p>tap or drag to jog &middot; double-tap to home</p>
+          <p>
+            {jogBlocked
+              ? "double-tap to home \u00b7 jogging unlocks after homing"
+              : "tap or drag to jog \u00b7 double-tap to home"}
+          </p>
         </div>
       </div>
 
