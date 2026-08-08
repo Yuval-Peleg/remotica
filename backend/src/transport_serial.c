@@ -172,6 +172,22 @@ typedef struct {
 
     int ticks_since_poll; /* counts up to TEMP_POLL_EVERY_N_TICKS */
 
+    /* Temperatures scraped out of reply lines while streaming a print.
+     *
+     * Why they're parked here instead of written straight to PrinterState:
+     * the lock-ordering rule above. These are captured inside the
+     * wait-for-ok read loops, which hold io_lock, and taking
+     * printer_state_lock there would put both locks in hand at once —
+     * exactly the thing that rule exists to make impossible. So the read
+     * loop only writes plain memory, and the caller flushes it to state
+     * once io_lock is released. Guarded by io_lock, like everything else
+     * touched inside those loops. */
+    int pending_temps;
+    double pending_hotend_c;
+    double pending_hotend_target_c;
+    double pending_bed_c;
+    double pending_bed_target_c;
+
     /* Line-number + checksum protocol state — see the big comment on
      * send_checksummed_line() for what this is and why. Both fields are
      * only ever touched while io_lock is held (set once at connect time,
@@ -460,7 +476,67 @@ static int read_line(int fd, char *buf, size_t buf_size, const struct timespec *
  * silent, and exactly the kind of desync that ends with a nozzle
  * somewhere it shouldn't be. Dropping whatever is in the input buffer is
  * the cheap way to guarantee we resynchronise. */
-static int send_and_wait_for_ok(int fd, const char *line, int timeout_ms, ConsoleLog *console) {
+/* Pulls temperatures out of any reply line that carries them, into the
+ * impl's pending_* fields. Call from inside a read loop — it holds no
+ * locks and touches no shared state beyond `impl`, which the caller
+ * already owns via io_lock.
+ *
+ * This exists because the tick thread's own M105 poll can't get a look in
+ * during a print: it uses trylock (deliberately — see serial_tick) while
+ * the streamer takes io_lock for every single line with no real gap
+ * between them. The reading therefore froze at whatever it was just
+ * before the file's M109 heat-and-wait, i.e. room temperature, and stayed
+ * there for the whole print. Scraping the replies that are already
+ * flowing costs nothing and needs no lock the streamer isn't holding. */
+static void capture_temperatures(SerialImplData *impl, const char *line) {
+    const char *hotend_part = strstr(line, "T:");
+    const char *bed_part = strstr(line, "B:");
+    if (hotend_part == NULL || bed_part == NULL) {
+        return;
+    }
+
+    double hotend_current = 0.0, hotend_target = 0.0, bed_current = 0.0, bed_target = 0.0;
+    if (sscanf(hotend_part, "T:%lf /%lf", &hotend_current, &hotend_target) != 2 ||
+        sscanf(bed_part, "B:%lf /%lf", &bed_current, &bed_target) != 2) {
+        return;
+    }
+
+    impl->pending_hotend_c = hotend_current;
+    impl->pending_hotend_target_c = hotend_target;
+    impl->pending_bed_c = bed_current;
+    impl->pending_bed_target_c = bed_target;
+    impl->pending_temps = 1;
+}
+
+/* Moves anything capture_temperatures() collected into PrinterState.
+ * MUST be called with io_lock released — see the lock-ordering rule on
+ * SerialImplData. */
+static void flush_pending_temperatures(PrinterDriver *self) {
+    SerialImplData *impl = (SerialImplData *)self->impl_data;
+
+    pthread_mutex_lock(&impl->io_lock);
+    int have = impl->pending_temps;
+    double hotend_current = impl->pending_hotend_c;
+    double hotend_target = impl->pending_hotend_target_c;
+    double bed_current = impl->pending_bed_c;
+    double bed_target = impl->pending_bed_target_c;
+    impl->pending_temps = 0;
+    pthread_mutex_unlock(&impl->io_lock);
+
+    if (!have) {
+        return;
+    }
+
+    printer_state_lock(self->state);
+    self->state->hotend.current_c = hotend_current;
+    self->state->hotend.target_c = hotend_target;
+    self->state->bed.current_c = bed_current;
+    self->state->bed.target_c = bed_target;
+    printer_state_unlock(self->state);
+}
+
+static int send_and_wait_for_ok(int fd, SerialImplData *impl, const char *line, int timeout_ms,
+                                ConsoleLog *console) {
     if (write_line(fd, line, console) != 0) {
         return -1;
     }
@@ -472,6 +548,10 @@ static int send_and_wait_for_ok(int fd, const char *line, int timeout_ms, Consol
 
     char reply[256];
     while (read_line(fd, reply, sizeof(reply), &deadline, console) >= 0) {
+        /* Before the "ok" check, because Marlin's own acknowledgement to
+         * M105 carries the numbers on that same line. */
+        capture_temperatures(impl, reply);
+
         if (strncmp(reply, "ok", 2) == 0) {
             return 0;
         }
@@ -558,7 +638,7 @@ static int resync_line_numbers(int fd, SerialImplData *impl, ConsoleLog *console
      * allowed to satisfy the M110 below. */
     tcflush(fd, TCIFLUSH);
 
-    if (send_and_wait_for_ok(fd, "M110 N0", TIMEOUT_MS_NORMAL, console) != 0) {
+    if (send_and_wait_for_ok(fd, impl, "M110 N0", TIMEOUT_MS_NORMAL, console) != 0) {
         return -1;
     }
 
@@ -637,6 +717,11 @@ static int send_checksummed_line(int fd, SerialImplData *impl, const char *line,
         int got_resend = 0;
         char reply[256];
         while (read_line(fd, reply, sizeof(reply), &deadline, console) >= 0) {
+            /* The print-streaming path, and so the one that matters most
+             * here: this loop is where a temperature auto-report lands
+             * during a print. */
+            capture_temperatures(impl, reply);
+
             if (strncmp(reply, "ok", 2) == 0) {
                 got_ok = 1;
                 break;
@@ -1032,9 +1117,27 @@ static int serial_connect(PrinterDriver *self) {
      * RepRap-protocol family — see gcode_checksum's comment) actually
      * gets the added corruption detection. */
     impl->checksums_enabled =
-        (send_and_wait_for_ok(impl->fd, "M110 N0", TIMEOUT_MS_NORMAL, self->console) == 0);
+        (send_and_wait_for_ok(impl->fd, impl, "M110 N0", TIMEOUT_MS_NORMAL, self->console) == 0);
     impl->next_line_number = 1;
     impl->needs_line_number_resync = 0; /* just negotiated — numbering is known-good */
+
+    /* Ask the firmware to report temperatures on its own every 2 seconds.
+     *
+     * This is what makes the reading stay live during a print. The tick
+     * thread's M105 poll uses trylock and effectively never wins while
+     * the streamer is holding io_lock for line after line, so without
+     * this the dashboard froze at whatever the temperature was just
+     * before the file's M109 heat-and-wait — room temperature — for the
+     * entire print. With auto-reporting on, the numbers arrive in the
+     * replies the streamer is already reading, and capture_temperatures()
+     * picks them up for free.
+     *
+     * Preferred over injecting our own M105 between print lines: nothing
+     * extra goes onto the wire, and no command of ours interleaves with
+     * the file. Failure is ignored on purpose — firmware without M155
+     * just answers with an error, and the idle-time tick poll still
+     * covers that case. */
+    send_and_wait_for_ok(impl->fd, impl, "M155 S2", TIMEOUT_MS_NORMAL, self->console);
 
     pthread_mutex_unlock(&impl->io_lock);
 
@@ -1101,16 +1204,16 @@ static int serial_jog(PrinterDriver *self, char axis, double delta_mm) {
     }
 
     int failed = 0;
-    if (send_and_wait_for_ok(impl->fd, "G91", TIMEOUT_MS_NORMAL, self->console) != 0) {
+    if (send_and_wait_for_ok(impl->fd, impl, "G91", TIMEOUT_MS_NORMAL, self->console) != 0) {
         failed = 1;
-    } else if (send_and_wait_for_ok(impl->fd, move_command, TIMEOUT_MS_NORMAL, self->console) !=
-               0) {
+    } else if (send_and_wait_for_ok(impl->fd, impl, move_command, TIMEOUT_MS_NORMAL,
+                                    self->console) != 0) {
         /* The move failed, but we're the ones who put the printer into
          * relative mode, so still try to put it back — leaving it in G91
          * would silently change the meaning of every later command. */
         failed = 1;
-        send_and_wait_for_ok(impl->fd, "G90", TIMEOUT_MS_NORMAL, self->console);
-    } else if (send_and_wait_for_ok(impl->fd, "G90", TIMEOUT_MS_NORMAL, self->console) != 0) {
+        send_and_wait_for_ok(impl->fd, impl, "G90", TIMEOUT_MS_NORMAL, self->console);
+    } else if (send_and_wait_for_ok(impl->fd, impl, "G90", TIMEOUT_MS_NORMAL, self->console) != 0) {
         failed = 1;
     }
     pthread_mutex_unlock(&impl->io_lock);
@@ -1157,7 +1260,7 @@ static int serial_home(PrinterDriver *self) {
         pthread_mutex_unlock(&impl->io_lock);
         return -1; /* not connected */
     }
-    int result = send_and_wait_for_ok(impl->fd, "G28", TIMEOUT_MS_HOMING, self->console);
+    int result = send_and_wait_for_ok(impl->fd, impl, "G28", TIMEOUT_MS_HOMING, self->console);
     pthread_mutex_unlock(&impl->io_lock);
 
     if (result != 0) {
@@ -1193,7 +1296,7 @@ static int serial_set_target_temp(PrinterDriver *self, PrinterHeater heater, dou
         pthread_mutex_unlock(&impl->io_lock);
         return -1; /* not connected */
     }
-    int result = send_and_wait_for_ok(impl->fd, command, TIMEOUT_MS_NORMAL, self->console);
+    int result = send_and_wait_for_ok(impl->fd, impl, command, TIMEOUT_MS_NORMAL, self->console);
     pthread_mutex_unlock(&impl->io_lock);
 
     if (result != 0) {
@@ -1352,8 +1455,13 @@ static int serial_send_gcode_line(PrinterDriver *self, const char *line) {
     int timeout_ms = command_timeout_ms(line);
     int result = impl->checksums_enabled
                      ? send_checksummed_line(impl->fd, impl, line, timeout_ms, self->console)
-                     : send_and_wait_for_ok(impl->fd, line, timeout_ms, self->console);
+                     : send_and_wait_for_ok(impl->fd, impl, line, timeout_ms, self->console);
     pthread_mutex_unlock(&impl->io_lock);
+
+    /* After the unlock, never before — see the lock-ordering rule on
+     * SerialImplData. This is what actually gets a live temperature onto
+     * the dashboard during a print. */
+    flush_pending_temperatures(self);
 
     return result;
 }

@@ -51,6 +51,7 @@ import tempfile
 import threading
 import time
 import tty
+import json
 import urllib.request
 import urllib.error
 
@@ -116,6 +117,28 @@ class FakeFirmware:
         self.m110_count = 0
         self.last_n = 0  # Marlin's gcode_LastN
 
+        # Temperature auto-reporting (M155). hotend_c climbs once heating
+        # is asked for, so a test can tell a live reading apart from a
+        # frozen one rather than both being the same constant.
+        self.autoreport_seconds = 0.0
+        self.hotend_c = 25.0
+
+    def _autoreport_loop(self):
+        """Unsolicited temperature reports, like real Marlin under M155."""
+        while not self._stop.is_set():
+            time.sleep(0.25)
+            with self.lock:
+                interval = self.autoreport_seconds
+                if self.hotend_c < 200.0:
+                    self.hotend_c = min(200.0, self.hotend_c + 12.0)
+                temp = self.hotend_c
+            if interval <= 0:
+                continue
+            if time.time() - getattr(self, "_last_autoreport", 0) < interval:
+                continue
+            self._last_autoreport = time.time()
+            self._write(f"T:{temp:.2f} /200.00 B:60.00 /60.00 @:0 B@:0")
+
     # --- wire I/O ---------------------------------------------------
 
     def _read_line(self, timeout):
@@ -155,6 +178,10 @@ class FakeFirmware:
     def start(self):
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
+        self._autoreport_thread = threading.Thread(
+            target=self._autoreport_loop, daemon=True
+        )
+        self._autoreport_thread.start()
 
     def stop(self):
         self._stop.set()
@@ -285,7 +312,18 @@ class FakeFirmware:
             self.executed.append(body)
 
         if body.startswith("M105"):
-            self._write("T:200.00 /200.00 B:60.00 /60.00 @:0 B@:0")
+            self._write(f"T:{self.hotend_c:.2f} /200.00 B:60.00 /60.00 @:0 B@:0")
+
+        # M155 Sn turns on unsolicited temperature reports every n seconds
+        # — real Marlin 2.x behaviour, and what keeps the dashboard live
+        # during a print (the backend's own M105 poll can't get the port
+        # lock while the streamer is using it). Scenario E depends on this.
+        if body.startswith("M155"):
+            try:
+                seconds = float(body.split("S")[1])
+            except (IndexError, ValueError):
+                seconds = 0.0
+            self.autoreport_seconds = seconds
 
         self._write("ok")
 
@@ -345,7 +383,40 @@ def wait_for_job_status(status_name, timeout):
     return False
 
 
+def confirm_printer_profile():
+    """Save a profile so jog/home/print-start are allowed.
+
+    Since 2026-08-08 the backend refuses those unless a human has
+    confirmed the printer in Settings (profile source == "manual") — an
+    auto-detected match deliberately isn't enough. POST /api/profile is
+    what a human pressing "Use this printer" does, so the harness does the
+    same thing. Without this every print scenario 409s before it starts.
+    """
+    payload = json.dumps(
+        {
+            "bedWidthMm": 220,
+            "bedDepthMm": 220,
+            "maxZMm": 250,
+            "minExtrudeTempC": 170,
+            "maxHotendTempC": 260,
+            "maxBedTempC": 100,
+            "printerName": "Fake Marlin",
+        }
+    ).encode()
+    req = urllib.request.Request(
+        API_BASE + "/api/profile",
+        data=payload,
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        return resp.status == 200
+
+
 def upload_and_start(gcode, filename):
+    if not confirm_printer_profile():
+        print("  FAIL: couldn't save the printer profile")
+        return False
     status, body = http_post(f"/api/upload?filename={filename}", data=gcode.encode())
     if status != 200:
         print(f"  FAIL: upload rejected ({status} {body[:200]})")
@@ -418,7 +489,13 @@ def print_lines_only(raw):
     return [
         l
         for l in raw
-        if not l.startswith("M115") and not l.startswith("M110") and "M105" not in l
+        if not l.startswith("M115")
+        and not l.startswith("M110")
+        # Connect-handshake traffic too: M155 turns on the firmware's
+        # temperature auto-reporting so the reading stays live during a
+        # print (see transport_serial.c's serial_connect).
+        and not l.startswith("M155")
+        and "M105" not in l
     ]
 
 
@@ -477,6 +554,64 @@ def scenario_checksums(label, respond_to_m110, resend_once_on):
                 return False
             print("  OK: fell back to plain unnumbered lines, exactly as before this feature")
 
+        print(f"  PASS: {label}")
+        return True
+
+
+def scenario_live_temperature():
+    """Scenario E: the temperature reading must stay live DURING a print.
+
+    The bug (found mid-print on real hardware, 2026-08-08): the dashboard
+    showed sub-50C while the printer's own screen showed 200C. The tick
+    thread's M105 poll uses trylock and effectively never wins while the
+    streamer holds io_lock line after line, so the reading froze at
+    whatever it was just before the file's heat-and-wait — room
+    temperature — for the entire print.
+
+    The fix asks the firmware to auto-report (M155) and scrapes those
+    lines out of the replies the streamer is already reading. This fake
+    firmware ramps its hotend from 25C to 200C once running, so a frozen
+    reading and a live one are trivially distinguishable.
+    """
+    label = "E: temperature stays live during a print"
+    print(f"\n=== Scenario: {label} ===")
+
+    with Session(respond_to_m110=True) as s:
+        if not wait_for_backend_ready():
+            print("  FAIL: backend never became reachable over HTTP")
+            return False
+        if not wait_for_connected():
+            print("  FAIL: driver did not report connected")
+            return False
+
+        # Long enough that the streamer holds the port for a good while.
+        gcode = "G90\n" + "".join(f"G1 X{i % 50} Y{i % 40}\n" for i in range(400))
+        if not upload_and_start(gcode, "pty_temps.gcode"):
+            return False
+
+        best = 0.0
+        deadline = time.time() + 25
+        while time.time() < deadline:
+            try:
+                _, body = http_get("/api/state")
+                best = max(best, json.loads(body)["hotend"]["current"])
+            except Exception:
+                pass
+            if best > 150.0:
+                break
+            time.sleep(0.4)
+
+        http_post("/api/print/cancel")
+        wait_for_job_status("idle", timeout=20)
+
+        if best < 150.0:
+            print(
+                f"  FAIL: hotend reading peaked at {best:.1f}C during the print — "
+                "expected it to track the firmware's climb to 200C"
+            )
+            return False
+
+        print(f"  OK: reading tracked live during the print (saw {best:.1f}C)")
         print(f"  PASS: {label}")
         return True
 
@@ -629,6 +764,7 @@ if __name__ == "__main__":
         )
     if "C" in wanted:
         results.append(("C: slow move + busy keepalives", scenario_busy_keepalive()))
+        results.append(("E: live temperature during a print", scenario_live_temperature()))
     if "D" in wanted:
         results.append(("D: abort-safety actually reaches the printer", scenario_abort_safety()))
 
