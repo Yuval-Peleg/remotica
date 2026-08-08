@@ -111,9 +111,27 @@ jobs:
         id: notes
         run: |
           TAG="${GITHUB_REF_NAME}"
+
+          # actions/checkout leaves behind a LIGHTWEIGHT tag pointing at
+          # the commit, even with fetch-depth: 0 — so reading the tag's
+          # message here silently falls back to the commit message, which
+          # is what shipped the wrong description on v0.1.2. Re-fetching
+          # the ref explicitly replaces it with the real annotated tag
+          # object.
+          git fetch --force origin "refs/tags/$TAG:refs/tags/$TAG" || true
+
+          SUBJECT=$(git tag -l --format='%(contents:subject)' "$TAG")
           MESSAGE=$(git tag -l --format='%(contents:body)' "$TAG")
           if [ -z "$(printf '%s' "$MESSAGE" | tr -d '[:space:]')" ]; then
             MESSAGE="See the README for what Remotica is and how to install it."
+          fi
+
+          # Title is the tag's subject line when there is one, so the
+          # release reads as a headline rather than a bare version number.
+          if [ -n "$SUBJECT" ]; then
+            printf 'name=%s — %s\n' "$TAG" "$SUBJECT" >> "$GITHUB_OUTPUT"
+          else
+            printf 'name=%s\n' "$TAG" >> "$GITHUB_OUTPUT"
           fi
 
           {
@@ -143,4 +161,5 @@ jobs:
             artifacts/*.tar.gz
             artifacts/SHA256SUMS
             packaging/install.sh
+          name: ${{ steps.notes.outputs.name }}
           body: ${{ steps.notes.outputs.body }}
