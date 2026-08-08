@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { CameraOff, Maximize, Minimize } from "lucide-react";
+import { CameraOff, Maximize, Minimize, RefreshCw } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
@@ -15,37 +15,39 @@ import { cn } from "@/lib/utils";
 const STATUS_POLL_MS = 1500;
 const STALL_THRESHOLD_MS = 4000;
 
-// Checked once on mount, same pattern as the printer profile fetch — if a
-// camera gets plugged in later, a page refresh picks it up, no polling
-// infrastructure for a secondary feature. `streamFailed` covers the other
-// direction: the backend reported a camera at mount time, but the actual
-// <img> stream broke afterward (camera unplugged mid-session, backend
-// restarted, etc.) — falls back to the same "no camera" placeholder rather
-// than showing a broken-image icon.
+// How long to wait before rebuilding a broken stream. Long enough that a
+// camera which is genuinely gone doesn't get hammered with a reconnect
+// every frame interval, short enough that replugging one feels immediate.
+const RECONNECT_DELAY_MS = 2000;
+
+// The camera is hot-pluggable, which is why this polls GET /api/camera
+// continuously rather than checking once on mount: each poll makes the
+// backend re-check the /dev/video* node list, so plugging a camera in
+// while the dashboard is open picks it up with no refresh. That poll is
+// cheap on purpose — the backend only actually opens a device when the
+// node list changed, so an idle machine never lights the camera's privacy
+// LED. See camera.c's device_nodes.
+//
+// The same poll drives recovery. An unplugged camera kills the backend's
+// capture thread, which ends the MJPEG response and fires the <img>'s
+// onError; `streamBroken` records that, and the reconnect effect below
+// rebuilds the stream once the backend reports a camera again. It is
+// deliberately not a one-way latch — it used to be, which is why a
+// replugged camera never came back without a page reload.
 export function CameraView() {
   const [info, setInfo] = useState({
     checked: false,
     available: false,
     name: "",
+    streaming: false,
   });
-  const [streamFailed, setStreamFailed] = useState(false);
+  const [streamBroken, setStreamBroken] = useState(false);
+  // Changing this remounts the <img> and cache-busts its URL, which is
+  // what actually reissues the stream request — React would otherwise
+  // reuse the element and the browser would reuse the dead response.
+  const [streamKey, setStreamKey] = useState(0);
   const [fullscreen, setFullscreen] = useState(false);
   const containerRef = useRef(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    api
-      .getCameraInfo()
-      .then((data) => {
-        if (!cancelled) setInfo({ checked: true, ...data });
-      })
-      .catch(() => {
-        if (!cancelled) setInfo({ checked: true, available: false, name: "" });
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
 
   useEffect(() => {
     const handleChange = () =>
@@ -62,7 +64,7 @@ export function CameraView() {
     }
   };
 
-  const showStream = info.available && !streamFailed;
+  const showStream = info.available && !streamBroken;
 
   // "pending" until the first poll, then "live"/"stalled" depending on
   // whether frameSeq has advanced within STALL_THRESHOLD_MS. Tracked in
@@ -73,20 +75,28 @@ export function CameraView() {
   const lastSeqRef = useRef(null);
   const lastChangeAtRef = useRef(0);
 
+  // Runs for the whole life of the component, not only while a stream is
+  // showing — this is what notices a camera being plugged in.
   useEffect(() => {
-    if (!showStream) {
-      setLiveStatus("pending");
-      return;
-    }
-
     let cancelled = false;
-    lastSeqRef.current = null;
 
     const poll = () => {
       api
         .getCameraInfo()
         .then((data) => {
           if (cancelled) return;
+          setInfo({ checked: true, ...data });
+
+          if (!data.available) {
+            // Nothing plugged in: forget any previous failure so a
+            // camera appearing later starts from a clean slate instead
+            // of inheriting the last one's broken state.
+            setStreamBroken(false);
+            setLiveStatus("pending");
+            lastSeqRef.current = null;
+            return;
+          }
+
           const seq = data.frameSeq ?? 0;
           const now = Date.now();
           if (lastSeqRef.current === null || seq !== lastSeqRef.current) {
@@ -99,7 +109,9 @@ export function CameraView() {
               : "stalled"
           );
         })
-        .catch(() => {});
+        .catch(() => {
+          if (!cancelled) setInfo((current) => ({ ...current, checked: true }));
+        });
     };
 
     poll();
@@ -108,7 +120,29 @@ export function CameraView() {
       cancelled = true;
       clearInterval(interval);
     };
-  }, [showStream]);
+  }, []);
+
+  // Rebuilds the stream when there's a camera to rebuild it on. Two ways
+  // in: the <img> errored (the usual one — the backend ends the response
+  // when its capture thread dies), or frames stopped advancing while the
+  // backend says it isn't capturing, which is the same death seen from
+  // the other side if the response happens to stay open.
+  const needsReconnect =
+    info.available &&
+    (streamBroken || (liveStatus === "stalled" && info.streaming === false));
+
+  useEffect(() => {
+    if (!needsReconnect) return;
+
+    const timer = setTimeout(() => {
+      setStreamBroken(false);
+      lastSeqRef.current = null;
+      lastChangeAtRef.current = Date.now();
+      setStreamKey((key) => key + 1);
+    }, RECONNECT_DELAY_MS);
+
+    return () => clearTimeout(timer);
+  }, [needsReconnect]);
 
   return (
     <Card>
@@ -120,10 +154,11 @@ export function CameraView() {
           {showStream ? (
             <>
               <img
-                src="/api/camera/stream"
+                key={streamKey}
+                src={`/api/camera/stream?connection=${streamKey}`}
                 alt="Printer camera stream"
                 className="size-full animate-fade object-contain"
-                onError={() => setStreamFailed(true)}
+                onError={() => setStreamBroken(true)}
               />
               {info.name && (
                 <div className="pointer-events-none absolute inset-x-0 top-0 bg-gradient-to-b from-background/80 to-transparent px-3 py-2 text-xs font-medium text-foreground">
@@ -169,8 +204,20 @@ export function CameraView() {
             </>
           ) : (
             <div className="flex size-full flex-col items-center justify-center gap-2 text-muted-foreground">
-              <CameraOff className="size-8" />
-              <span className="text-sm">No camera detected</span>
+              {info.available ? (
+                <>
+                  <RefreshCw className="size-8 animate-spin" />
+                  <span className="text-sm">Reconnecting to the camera…</span>
+                </>
+              ) : (
+                <>
+                  <CameraOff className="size-8" />
+                  <span className="text-sm">No camera detected</span>
+                  <span className="max-w-56 text-center text-xs">
+                    Plug one in and it&apos;ll appear here — no refresh needed.
+                  </span>
+                </>
+              )}
             </div>
           )}
         </div>

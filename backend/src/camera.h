@@ -11,19 +11,19 @@
  * display directly with a plain `<img src="/api/camera/stream">`, no
  * client-side video-decoding JavaScript needed.
  *
- * *** WRITTEN CAREFULLY BUT NOT VERIFIED AGAINST REAL FRAME CAPTURE ***
- * Device discovery (querying a camera's name/capabilities via
+ * *** VERIFIED AGAINST REAL FRAME CAPTURE (2026-08-08) ***
+ * Both halves are now confirmed against a real UVC webcam. Device
+ * discovery (querying a camera's name/capabilities via
  * VIDIOC_QUERYCAP/VIDIOC_ENUM_FMT) is a passive metadata read — it does
- * NOT turn the camera on or capture any image — and has been checked
- * against a real webcam. Actually capturing and streaming frames has
- * NOT: that means turning the camera on and pulling real images, which
- * — unlike querying a 3D printer's firmware — has real privacy
- * implications (a camera can see into wherever it's pointed), so it
- * needs explicit permission each time rather than being something to
- * just try. Treat this the same way transport_serial.c's untested-
- * against-real-hardware warning is treated: written carefully, but test
- * cautiously before relying on it, and check the stream actually shows
- * something sensible before trusting it unattended.
+ * NOT turn the camera on or capture any image. The mmap capture loop and
+ * the MJPEG multipart stream are confirmed too: a 3-second request to
+ * GET /api/camera/stream produced 24 parts, each a well-formed 640x480
+ * JPEG (correct SOI/EOI markers), with frameSeq advancing in step.
+ *
+ * Still worth checking the picture actually shows something sensible
+ * before trusting it unattended, and note the privacy dimension that
+ * shapes the design below: turning a camera on — unlike querying a 3D
+ * printer's firmware — can see into wherever it's pointed.
  *
  * For that same reason, capture is LAZY: camera_init() only discovers
  * whether a usable camera exists (a passive check, safe to run on every

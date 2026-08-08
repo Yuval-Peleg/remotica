@@ -26,12 +26,20 @@ start to finish, is still the outstanding milestone — and specifically
 worth watching: whether the abort-safety sequence actually drops the
 heaters when a print is cancelled from the UI.
 
-## Camera capture verification
+## Camera: multiple cameras, and reconnect while streaming
 
-`camera.c`'s device discovery is verified against a real webcam, but the
-actual mmap-based V4L2 capture loop and MJPEG streaming
-(`camera_stream_handler`) have not been checked against real frame
-capture — see the warning in `camera.h`.
+Frame capture itself is verified as of 2026-08-08 (real UVC webcam, real
+640x480 JPEG frames over the MJPEG stream), and the camera is now
+hot-pluggable — plugging one in or replugging it is picked up without a
+restart or a page refresh.
+
+Two gaps remain. **Only the first usable `/dev/video*` device is ever
+used**: a machine with two cameras can't choose between them, and
+there's no UI for it. And **an unplug is only noticed once capture is
+actually running** — the capture thread's read failure is what detects
+it. A camera unplugged while nobody is viewing the stream still shows as
+available until someone opens it, since noticing sooner would mean
+polling the device, which lights its privacy LED.
 
 ## Installer not yet verified on a clean machine
 

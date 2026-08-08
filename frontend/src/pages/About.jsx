@@ -38,14 +38,13 @@ const WORKING = [
   "Identifying some printers automatically from their firmware reply",
   "Uploading G-code, keeping it on the device, and starting a print",
   "Jogging and homing from the control panel",
-  "An optional webcam view",
+  "An optional webcam view, hot-pluggable and confirmed capturing frames",
 ];
 
 const UNVERIFIED = [
   "A full print, start to finish, on real hardware",
   "Jog, home, and temperature commands against a physical printer",
   "The checksum and resend path a long print depends on",
-  "Live webcam frame capture (device detection is confirmed, capture isn't)",
   "Noticing a printer that disappears mid-session",
   "Any kind of access control — anyone on your network can drive it",
 ];

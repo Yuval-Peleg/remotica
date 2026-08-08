@@ -1,10 +1,9 @@
 /*
  * camera.c
  * =========
- * See camera.h for the overview and the important warning about frame
- * capture being unverified against real hardware. This file is the
- * "how": V4L2 device discovery, mmap-based capture, and serving the
- * result as an MJPEG multipart HTTP stream.
+ * See camera.h for the overview and the privacy reasoning that shapes
+ * this design. This file is the "how": V4L2 device discovery, mmap-based
+ * capture, and serving the result as an MJPEG multipart HTTP stream.
  */
 
 /* -std=c99 hides several POSIX functions (usleep(), strdup()) unless we
@@ -72,15 +71,19 @@ typedef struct {
  * instance is deliberate, the same reasoning as WsBroadcaster/ConsoleLog
  * being owned once by main.c: there's exactly one camera concept this
  * backend cares about, not per-connection state. See each field's own
- * comment for its locking rules — this struct has two different locks
- * for two different reasons, not one lock for everything. */
+ * comment for its locking rules — this struct has three different locks
+ * for three different reasons, not one lock for everything. Acquire them
+ * in the order start_lock → scan_lock → lock, never the reverse. */
 static struct {
     pthread_mutex_t lock;
 
-    /* Filled in once by camera_init() from a passive discovery scan —
-     * device_path[0] == '\0' means no usable camera was found at all.
-     * Finding one does NOT open it or turn it on; see start_lock below
-     * for what actually does. */
+    /* The camera currently believed to be present, from a passive
+     * discovery scan — device_path[0] == '\0' means none. Written by
+     * camera_init() at startup and by rescan_camera_if_changed() whenever
+     * the /dev/video* node list changes, so this tracks hot-plug rather
+     * than being fixed for the process's life. Finding a camera does NOT
+     * open it or turn it on; see start_lock below for what actually
+     * does. */
     char device_path[64];
     char name[128]; /* from VIDIOC_QUERYCAP's "card" field */
 
@@ -128,9 +131,37 @@ static struct {
     pthread_t capture_thread;
     int capture_thread_running;
     volatile int stop_requested;
+
+    /* Set by the capture thread when it gives up because the device
+     * errored out — an unplug, in practice. Distinct from
+     * stop_requested, which means "we asked it to stop": this one means
+     * "it stopped on its own and what's here is now stale", which is
+     * what lets ensure_capture_started() tear the dead session down and
+     * open the camera again rather than believing capture is still
+     * running. Without it, capture_started stayed 1 and fd stayed open
+     * on a device that no longer existed, so replugging never recovered
+     * and every viewer sat on a frozen frame forever. */
+    volatile int capture_failed;
+
+    /* Serializes device re-discovery. Deliberately NOT start_lock:
+     * ensure_capture_started() holds that and needs to trigger a rescan,
+     * which would deadlock on a single lock. */
+    pthread_mutex_t scan_lock;
+
+    /* The sorted /dev/video* node list as of the last scan. Comparing
+     * this is how hot-plug is noticed WITHOUT opening anything: an
+     * open() on a webcam turns its privacy LED on, so probing every few
+     * seconds just in case would leave the LED flickering forever on an
+     * idle machine — the opposite of the lazy-capture posture in
+     * camera.h. Plugging or unplugging changes the node list, so the
+     * cheap glob catches every real change and the expensive probe only
+     * runs when something actually did change. */
+    char device_nodes[512];
+    int scanned_once;
 } g_camera = {
     .lock = PTHREAD_MUTEX_INITIALIZER,
     .start_lock = PTHREAD_MUTEX_INITIALIZER,
+    .scan_lock = PTHREAD_MUTEX_INITIALIZER,
     .fd = -1,
 };
 
@@ -369,6 +400,11 @@ static void *capture_thread_main(void *arg) {
             }
             fprintf(stderr, "camera: VIDIOC_DQBUF failed: %s — stopping capture\n",
                     strerror(errno));
+            /* Flagged rather than just returning, so a later stream
+             * request can tell "the camera died" apart from "capture was
+             * never started" and rebuild the session instead of assuming
+             * this thread is still alive. */
+            g_camera.capture_failed = 1;
             break;
         }
 
@@ -396,14 +432,134 @@ static void *capture_thread_main(void *arg) {
  * Public API
  * --------------------------------------------------------------------- */
 
+/* Builds the current /dev/video* node list into `out`, cheaply — glob
+ * only, nothing is opened. This is the hot-plug tripwire; see
+ * g_camera.device_nodes for why it must stay open()-free. */
+static void read_device_nodes(char *out, size_t out_size) {
+    out[0] = '\0';
+
+    glob_t matches = {0};
+    if (glob("/dev/video*", 0, NULL, &matches) != 0) {
+        globfree(&matches);
+        return;
+    }
+
+    size_t used = 0;
+    for (size_t i = 0; i < matches.gl_pathc; i++) {
+        int written =
+            snprintf(out + used, out_size - used, "%s%s", used > 0 ? ":" : "", matches.gl_pathv[i]);
+        if (written <= 0 || (size_t)written >= out_size - used) {
+            break;
+        }
+        used += (size_t)written;
+    }
+
+    globfree(&matches);
+}
+
+/* Re-runs discovery, but only when the set of /dev/video* nodes has
+ * actually changed since last time — so an idle machine never touches
+ * the camera at all, and a plug or unplug is picked up on the next call.
+ *
+ * Called from GET /api/camera (so hot-plug is noticed whenever anyone is
+ * looking at the dashboard) and from ensure_capture_started() when there
+ * is no known device. Returns 1 if a usable camera is known afterwards. */
+static int rescan_camera_if_changed(void) {
+    pthread_mutex_lock(&g_camera.scan_lock);
+
+    char nodes[sizeof(g_camera.device_nodes)];
+    read_device_nodes(nodes, sizeof(nodes));
+
+    if (g_camera.scanned_once && strcmp(nodes, g_camera.device_nodes) == 0) {
+        pthread_mutex_unlock(&g_camera.scan_lock);
+        pthread_mutex_lock(&g_camera.lock);
+        int known = (g_camera.device_path[0] != '\0');
+        pthread_mutex_unlock(&g_camera.lock);
+        return known;
+    }
+
+    /* Probing opens devices, so it happens outside g_camera.lock — the
+     * status handler and stream loop take that constantly and must not
+     * be blocked behind a device probe. */
+    char name[sizeof(g_camera.name)];
+    name[0] = '\0';
+    char *device_path = discover_camera_device(name, sizeof(name));
+
+    pthread_mutex_lock(&g_camera.lock);
+    char previous[sizeof(g_camera.device_path)];
+    snprintf(previous, sizeof(previous), "%s", g_camera.device_path);
+
+    if (device_path != NULL) {
+        snprintf(g_camera.device_path, sizeof(g_camera.device_path), "%s", device_path);
+        snprintf(g_camera.name, sizeof(g_camera.name), "%s", name);
+    } else {
+        g_camera.device_path[0] = '\0';
+        g_camera.name[0] = '\0';
+    }
+    pthread_mutex_unlock(&g_camera.lock);
+
+    snprintf(g_camera.device_nodes, sizeof(g_camera.device_nodes), "%s", nodes);
+    g_camera.scanned_once = 1;
+    pthread_mutex_unlock(&g_camera.scan_lock);
+
+    if (device_path != NULL && strcmp(previous, device_path) != 0) {
+        printf("Camera connected: %s (%s).\n", name, device_path);
+        fflush(stdout);
+    } else if (device_path == NULL && previous[0] != '\0') {
+        printf("Camera disconnected (%s is gone).\n", previous);
+        fflush(stdout);
+    }
+
+    int known = (device_path != NULL);
+    free(device_path);
+    return known;
+}
+
+/* Tears down a capture session so a fresh one can be started: joins the
+ * capture thread, unmaps buffers, closes the fd, and clears the flags
+ * that would otherwise make ensure_capture_started() think capture is
+ * still running. Safe to call when nothing is running.
+ *
+ * Callers must NOT hold g_camera.lock — this joins a thread that takes
+ * that lock on every frame. */
+static void stop_capture(void) {
+    if (!g_camera.capture_thread_running) {
+        return;
+    }
+
+    g_camera.stop_requested = 1;
+    pthread_join(g_camera.capture_thread, NULL);
+    g_camera.capture_thread_running = 0;
+
+    int fd = g_camera.fd;
+    if (fd >= 0) {
+        teardown_capture(fd);
+        close(fd);
+    }
+
+    pthread_mutex_lock(&g_camera.lock);
+    g_camera.fd = -1;
+    free(g_camera.latest_frame);
+    g_camera.latest_frame = NULL;
+    g_camera.latest_frame_size = 0;
+    pthread_mutex_unlock(&g_camera.lock);
+
+    g_camera.capture_started = 0;
+    g_camera.capture_failed = 0;
+    g_camera.stop_requested = 0;
+}
+
 void camera_init(void) {
     char name[sizeof(g_camera.name)];
     name[0] = '\0';
 
+    read_device_nodes(g_camera.device_nodes, sizeof(g_camera.device_nodes));
+    g_camera.scanned_once = 1;
+
     char *device_path = discover_camera_device(name, sizeof(name));
     if (device_path == NULL) {
-        printf("No usable camera found (checked /dev/video* for an MJPEG-capable capture "
-               "device).\n");
+        printf("No camera connected yet (checked /dev/video* for an MJPEG-capable capture "
+               "device). Plugging one in later is picked up automatically.\n");
         return;
     }
 
@@ -433,6 +589,15 @@ void camera_init(void) {
 static int ensure_capture_started(void) {
     pthread_mutex_lock(&g_camera.start_lock);
 
+    /* A session whose capture thread died (unplug) must be torn down
+     * before anything can be rebuilt — otherwise capture_started is
+     * still 1 below and this returns "already running" for a camera
+     * that's gone, which is exactly why replugging used to never bring
+     * the picture back. */
+    if (g_camera.capture_failed) {
+        stop_capture();
+    }
+
     if (g_camera.capture_started) {
         pthread_mutex_unlock(&g_camera.start_lock);
         return 1;
@@ -440,11 +605,21 @@ static int ensure_capture_started(void) {
 
     pthread_mutex_lock(&g_camera.lock);
     int has_device = (g_camera.device_path[0] != '\0');
+    pthread_mutex_unlock(&g_camera.lock);
+
+    /* The camera may have come back on a different /dev/videoN than it
+     * left on, so this re-reads the node list rather than trusting the
+     * path from before the unplug. Cheap when nothing changed. */
+    if (!has_device) {
+        has_device = rescan_camera_if_changed();
+    }
+
+    pthread_mutex_lock(&g_camera.lock);
     char device_path[sizeof(g_camera.device_path)];
     snprintf(device_path, sizeof(device_path), "%s", g_camera.device_path);
     pthread_mutex_unlock(&g_camera.lock);
 
-    if (!has_device) {
+    if (!has_device || device_path[0] == '\0') {
         pthread_mutex_unlock(&g_camera.start_lock);
         return 0;
     }
@@ -489,23 +664,12 @@ static int ensure_capture_started(void) {
 }
 
 void camera_shutdown(void) {
-    if (!g_camera.capture_thread_running) {
-        return;
-    }
-
-    g_camera.stop_requested = 1;
-    pthread_join(g_camera.capture_thread, NULL);
-    g_camera.capture_thread_running = 0;
-
-    int fd = g_camera.fd;
-    teardown_capture(fd);
-    close(fd);
-
-    pthread_mutex_lock(&g_camera.lock);
-    g_camera.fd = -1;
-    free(g_camera.latest_frame);
-    g_camera.latest_frame = NULL;
-    pthread_mutex_unlock(&g_camera.lock);
+    /* Same teardown a failed session gets — see stop_capture(). Called
+     * from main.c before mg_stop() specifically so an open browser tab
+     * streaming the camera can't make shutdown hang. */
+    pthread_mutex_lock(&g_camera.start_lock);
+    stop_capture();
+    pthread_mutex_unlock(&g_camera.start_lock);
 }
 
 /* ---------------------------------------------------------------------
@@ -519,6 +683,12 @@ static int camera_info_handler(struct mg_connection *conn, void *cbdata) {
         mg_send_http_error(conn, 405, "Use GET");
         return 1;
     }
+
+    /* This is what makes the camera hot-pluggable: the frontend polls
+     * this endpoint, and each poll re-checks the /dev/video* node list.
+     * Nothing is opened unless that list actually changed, so an idle
+     * machine never touches the camera — see g_camera.device_nodes. */
+    rescan_camera_if_changed();
 
     pthread_mutex_lock(&g_camera.lock);
     /* "available" here means "was discovered and looks usable," not
@@ -543,6 +713,10 @@ static int camera_info_handler(struct mg_connection *conn, void *cbdata) {
     cJSON_AddBoolToObject(root, "available", available);
     cJSON_AddStringToObject(root, "name", name);
     cJSON_AddNumberToObject(root, "frameSeq", (double)frame_seq);
+    /* Lets the frontend tell "the picture is frozen but capture is fine"
+     * apart from "capture died and reconnecting would actually help" —
+     * frameSeq going flat looks identical in both cases. */
+    cJSON_AddBoolToObject(root, "streaming", g_camera.capture_started && !g_camera.capture_failed);
 
     char *text = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
@@ -592,6 +766,16 @@ static int camera_stream_handler(struct mg_connection *conn, void *cbdata) {
     for (;;) {
         unsigned char *frame = NULL;
         size_t frame_size = 0;
+
+        /* capture_failed as well as fd, because an unplug leaves fd set
+         * to a now-dead device — checking fd alone left this loop
+         * spinning forever, sending nothing, which is what the browser
+         * saw as a permanently frozen frame. Breaking here ends the HTTP
+         * response, so the <img> fires onError and the frontend can
+         * decide to reconnect. */
+        if (g_camera.capture_failed) {
+            break;
+        }
 
         pthread_mutex_lock(&g_camera.lock);
         if (g_camera.fd < 0) {
