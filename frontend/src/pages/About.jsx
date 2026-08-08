@@ -36,15 +36,13 @@ const WORKING = [
   "Connecting to a printer over USB, including finding the port on its own",
   "Reading live temperatures, and setting hotend and bed targets",
   "Identifying some printers automatically from their firmware reply",
-  "Uploading G-code, keeping it on the device, and starting a print",
+  "Uploading G-code and printing it — a 5h job has run start to finish",
   "Jogging and homing from the control panel",
   "An optional webcam view, hot-pluggable and confirmed capturing frames",
 ];
 
 const UNVERIFIED = [
-  "A full print, start to finish, on real hardware",
-  "Jog, home, and temperature commands against a physical printer",
-  "The checksum and resend path a long print depends on",
+  "Cancelling a print actually dropping the heaters, on real hardware",
   "Noticing a printer that disappears mid-session",
   "Any kind of access control — anyone on your network can drive it",
 ];
@@ -142,13 +140,15 @@ export function About() {
 
       <Alert variant="destructive" className="animate-rise">
         <TriangleAlert />
-        <AlertTitle>Don&apos;t leave this running a real print yet</AlertTitle>
+        <AlertTitle>
+          Don&apos;t leave this running an unattended print
+        </AlertTitle>
         <AlertDescription>
-          This project drives heaters and motors, and the code that does so has
-          only been partly tested against a physical printer. A bug in it could
-          damage hardware or start a fire. Treat it as something to experiment
-          with while you&apos;re standing next to the machine — not as something
-          to trust with an unattended print.
+          Full prints do complete on real hardware — but two things are still
+          unproven: that cancelling a print actually drops the heaters, and that
+          Remotica notices a printer disappearing mid-job. It drives heaters and
+          motors, so being wrong there could damage hardware or start a fire.
+          Stay within reach of the machine.
         </AlertDescription>
       </Alert>
 

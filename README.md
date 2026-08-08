@@ -71,14 +71,15 @@ Laptop lid: set `HandleLidSwitch=ignore` in `/etc/systemd/logind.conf`, then `su
 
 ## Project status
 
-Early, but real — it drives an actual printer. The caution is about how much has been *proven*, not whether it works.
+Real. A full 5-hour print has run start to finish on an Ender 3 (stock Marlin 2.1.2.4). The caution below is about what hasn't been proven yet, not whether it works.
 
 | Confirmed on real hardware | Not yet |
 | --- | --- |
-| Connecting, port auto-discovery | Abort-safety on cancel (heaters off) |
-| Live temperatures, setting targets | Recovery after an interrupted print |
-| Jog, home, printing | Any access control |
-| Webcam capture, hot-plug | Installer on a clean machine |
+| A complete print, 5h, start to finish | Abort-safety on cancel (heaters off) |
+| Connecting, port auto-discovery | Recovery after an interrupted print |
+| Live temperatures, setting targets | Any access control |
+| Jog and home | Installer on a clean machine |
+| Webcam capture, hot-plug | |
 
 Two things to know before trusting it further:
 

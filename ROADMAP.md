@@ -6,6 +6,15 @@ a schedule — see `CLAUDE.md` for how each already-built piece works today.
 
 ## Real-hardware verification still outstanding
 
+**A full print is done (2026-08-08):** a 5-hour job completed start to
+finish on a real Ender 3, via an installed v0.1.2. That closes the
+headline milestone below — print streaming, the checksum/resend path
+under sustained load, jog, home and temperature-set are all exercised by
+that run. What remains outstanding is the *abort* path: nobody has yet
+watched a cancel from the UI actually drop the heaters on real hardware,
+which is the one failure that already bit once (see below).
+
+
 `transport_serial.c` has only been partially verified against a real
 printer (an Ender 3, stock Marlin 2.1.2.4, 2026-08-01) — connect,
 `--serial auto` discovery, and temperature polling are confirmed working.
