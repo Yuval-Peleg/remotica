@@ -6,6 +6,16 @@ const MAX_TEMP = 300;
 const SIZE = 88;
 const STROKE_WIDTH = 8;
 const RADIUS = (SIZE - STROKE_WIDTH) / 2;
+
+// The ring's outer edge lands at exactly RADIUS + STROKE_WIDTH / 2, which
+// is SIZE / 2 — flush against the SVG's own edge. An SVG clips to its
+// viewport, so the heating glow below (a drop-shadow that spreads several
+// pixels outward) was painted outside it and sliced off square. This pads
+// the canvas so the glow has somewhere to go. The SVG is positioned by
+// this same inset, so the dial's layout size is unchanged — the padding
+// is transparent overspill, not extra space in the row.
+const GLOW_PADDING = 10;
+const CANVAS = SIZE + GLOW_PADDING * 2;
 const CIRCUMFERENCE = 2 * Math.PI * RADIUS;
 // A real reading hovering right around 0 (ambient temp with sensor jitter,
 // see transport_sim.c) would otherwise push the ring's progress to exactly
@@ -57,17 +67,22 @@ export function TempDial({
       </div>
 
       <div className="relative" style={{ width: SIZE, height: SIZE }}>
-        <svg width={SIZE} height={SIZE} className="-rotate-90">
+        <svg
+          width={CANVAS}
+          height={CANVAS}
+          className="absolute -rotate-90 overflow-visible"
+          style={{ left: -GLOW_PADDING, top: -GLOW_PADDING }}
+        >
           <circle
-            cx={SIZE / 2}
-            cy={SIZE / 2}
+            cx={CANVAS / 2}
+            cy={CANVAS / 2}
             r={RADIUS}
             strokeWidth={STROKE_WIDTH}
             className="fill-none stroke-muted"
           />
           <circle
-            cx={SIZE / 2}
-            cy={SIZE / 2}
+            cx={CANVAS / 2}
+            cy={CANVAS / 2}
             r={RADIUS}
             strokeWidth={STROKE_WIDTH}
             strokeLinecap="round"

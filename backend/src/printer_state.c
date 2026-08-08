@@ -65,6 +65,7 @@ cJSON *printer_state_to_json(PrinterState *state) {
     printer_state_lock(state);
 
     int connected = state->connected;
+    int homed = state->homed;
     char connection_type[sizeof(state->connection_type)];
     strncpy(connection_type, state->connection_type, sizeof(connection_type));
     char firmware_info[sizeof(state->firmware_info)];
@@ -88,6 +89,7 @@ cJSON *printer_state_to_json(PrinterState *state) {
     cJSON *root = cJSON_CreateObject();
 
     cJSON_AddBoolToObject(root, "connected", connected);
+    cJSON_AddBoolToObject(root, "homed", homed);
     cJSON_AddStringToObject(root, "connectionType", connection_type);
     cJSON_AddStringToObject(root, "firmwareInfo", firmware_info);
 

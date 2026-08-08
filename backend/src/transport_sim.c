@@ -71,6 +71,9 @@ static double jitter(double amount) {
 static int sim_connect(PrinterDriver *self) {
     printer_state_lock(self->state);
     self->state->connected = 1;
+    /* A printer that was just power-cycled or replugged has lost its
+     * homing, whatever this process remembered from last time. */
+    self->state->homed = 0;
     /* Mirrors what a real M115 reply would populate on transport_serial.c
      * (see query_firmware_info there), so the Settings page's "detected
      * firmware" hint has something to show in the default sim-driven demo

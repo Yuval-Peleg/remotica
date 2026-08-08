@@ -319,6 +319,13 @@ static int home_handler(struct mg_connection *conn, void *cbdata) {
         return 1;
     }
 
+    /* Only on a confirmed success — this is what unblocks the frontend's
+     * "home before you can move" notice, and claiming a printer is homed
+     * when it isn't would hide exactly the state that notice exists for. */
+    printer_state_lock(ctx->state);
+    ctx->state->homed = 1;
+    printer_state_unlock(ctx->state);
+
     send_ok(conn);
     return 1;
 }

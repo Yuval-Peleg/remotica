@@ -63,6 +63,7 @@ function StatRow({ label, value }) {
 export function Dashboard() {
   const {
     connected,
+    homed,
     connectionType,
     firmwareInfo,
     hotend,
@@ -244,6 +245,8 @@ export function Dashboard() {
               position={position}
               jobStatus={job.status}
               profile={profile}
+              connected={connected}
+              homed={homed}
               jog={jog}
               home={home}
               setHotendTarget={setHotendTarget}

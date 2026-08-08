@@ -1040,6 +1040,9 @@ static int serial_connect(PrinterDriver *self) {
 
     printer_state_lock(self->state);
     self->state->connected = 1;
+    /* A printer that was just power-cycled or replugged has lost its
+     * homing, whatever this process remembered from last time. */
+    self->state->homed = 0;
     snprintf(self->state->firmware_info, sizeof(self->state->firmware_info), "%s", firmware_info);
     printer_state_unlock(self->state);
 

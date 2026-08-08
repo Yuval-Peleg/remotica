@@ -13,8 +13,8 @@ import { cn } from "@/lib/utils";
 
 const navLinks = [
   { to: "/", label: "Home", end: true },
-  { to: "/system", label: "System" },
   { to: "/settings", label: "Settings" },
+  { to: "/system", label: "System" },
   { to: "/about", label: "About" },
 ];
 

@@ -48,6 +48,7 @@ export function BedSchematic({
   onJog,
   onHome,
   homing = false,
+  homed = false,
 }) {
   const areaRef = useRef(null);
   const [dragging, setDragging] = useState(false);
@@ -154,7 +155,11 @@ export function BedSchematic({
   };
 
   const displayPosition = previewPosition ?? position;
-  const isHomed = position.x === 0 && position.y === 0;
+  // Comes from the backend (set on a confirmed G28, cleared on connect)
+  // rather than being inferred from position being 0,0 — a printer that
+  // has just connected reports 0,0 without having been homed at all, so
+  // the old test showed the "homed" marker exactly when it was wrong.
+  const isHomed = homed;
   const markerLeftPct = (displayPosition.x / bedWidthMm) * 100;
   const markerTopPct = 100 - (displayPosition.y / bedDepthMm) * 100;
   const gridDivisions = Math.max(2, Math.round(bedWidthMm / GRID_CELL_MM));

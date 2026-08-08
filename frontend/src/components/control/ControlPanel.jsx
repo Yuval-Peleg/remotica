@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 import {
   Flame,
+  Home,
   Lock,
   Settings as SettingsIcon,
   Thermometer,
@@ -19,6 +20,8 @@ export function ControlPanel({
   position,
   jobStatus,
   profile,
+  connected,
+  homed,
   jog,
   home,
   setHotendTarget,
@@ -44,8 +47,35 @@ export function ControlPanel({
     jog("E", deltaMm);
   };
 
+  // Not a Remotica restriction — Marlin and most other firmware refuse
+  // ordinary moves until a G28 has run, because before that the printer
+  // genuinely doesn't know where the head is. Without saying so, a jog
+  // just silently does nothing and looks like Remotica being broken. The
+  // controls are deliberately left enabled: the firmware is the authority
+  // here, and some machines will happily move without homing.
+  const needsHoming =
+    connected && isProfileConfigured && !isPrintActive && !homed;
+
   return (
     <div className="relative flex flex-col gap-4">
+      {needsHoming && (
+        <div className="flex animate-rise flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2">
+          <p className="text-xs text-amber-200">
+            Home the printer before moving it — until then it doesn&apos;t know
+            where the head is, and most firmware refuses to move.
+          </p>
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={handleHome}
+            disabled={homing}
+          >
+            <Home className="size-3.5" />
+            {homing ? "Homing…" : "Home now"}
+          </Button>
+        </div>
+      )}
+
       <div
         className={cn(
           "flex flex-col gap-6 transition-opacity duration-300 ease-soft lg:flex-row lg:items-center",
@@ -61,6 +91,7 @@ export function ControlPanel({
             onJog={jog}
             onHome={handleHome}
             homing={homing}
+            homed={homed}
           />
         </div>
 

@@ -7,6 +7,11 @@ const RECONNECT_DELAY_MS = 2000;
 
 const INITIAL_STATE = {
   connected: false,
+  // Assumed homed until the backend says otherwise, so the "home first"
+  // notice can't flash on screen during the moment before the first state
+  // arrives — it should appear because the printer really isn't homed,
+  // not because nothing has been heard yet.
+  homed: true,
   connectionType: "usb",
   hotend: { current: 0, target: 0 },
   bed: { current: 0, target: 0 },

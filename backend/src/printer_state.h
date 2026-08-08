@@ -92,6 +92,22 @@ typedef struct {
                               * full M115 reply line can never be
                               * truncated a second time on the way in */
 
+    /* 1 once a G28 has completed successfully on this connection, else 0.
+     * Marlin (and most firmware) refuses ordinary moves until the printer
+     * has been homed, because before that it genuinely does not know
+     * where the head is — so a jog sent to an unhomed printer is quietly
+     * rejected by the firmware and looks to the user like Remotica doing
+     * nothing at all.
+     *
+     * Tracked here rather than inferred from position, which the frontend
+     * used to do (x == 0 && y == 0): a freshly connected printer reports
+     * 0,0 because nothing has told it otherwise, so that test called an
+     * unhomed printer homed — exactly backwards, and precisely in the
+     * situation where the warning matters most. Reset to 0 on every
+     * connect, since a printer that was power-cycled or replugged has
+     * lost its homing regardless of what this process remembers. */
+    int homed;
+
     TempReading hotend;
     TempReading bed;
     PrinterPosition position;
