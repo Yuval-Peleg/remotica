@@ -102,7 +102,10 @@ export function Settings() {
   useEffect(() => {
     if (userPickedRef.current || !profile || printers.length === 0) return;
 
-    if (profile.source === "default") {
+    // "auto" as well as "default": an auto-detected profile is only a
+    // proposal until someone confirms it, so the suggestion is still what
+    // should be preselected — that's what makes confirming one click.
+    if (profile.source !== "manual") {
       if (suggestion?.match) setSelectedId(suggestion.match.id);
       return;
     }
@@ -195,8 +198,8 @@ export function Settings() {
 
   const inUseLabel = !profile
     ? null
-    : profile.source === "default"
-      ? "Nothing yet"
+    : profile.source !== "manual"
+      ? "Nothing confirmed yet"
       : profile.printerName || "Custom profile";
 
   return (
@@ -317,11 +320,12 @@ export function Settings() {
           <CardTitle className="text-base">Choose your printer</CardTitle>
         </CardHeader>
         <CardContent className="flex flex-col gap-4">
-          {profile?.source === "default" && (
+          {profile && profile.source !== "manual" && (
             <Alert className="animate-pop">
               <AlertDescription>
-                No printer chosen yet. Jogging, homing, and starting a print
-                stay blocked until you save one here.
+                {profile.source === "auto" && profile.printerName
+                  ? `Remotica thinks this is a ${profile.printerName}, but nothing is confirmed yet. Jogging, homing, and starting a print stay blocked until you save a printer here.`
+                  : "No printer chosen yet. Jogging, homing, and starting a print stay blocked until you save one here."}
               </AlertDescription>
             </Alert>
           )}

@@ -29,7 +29,12 @@ export function ControlPanel({
 }) {
   const canExtrude = hotend.current >= profile.minExtrudeTempC;
   const isPrintActive = jobStatus === "printing" || jobStatus === "paused";
-  const isProfileConfigured = profile.source && profile.source !== "default";
+  // Only a human pressing "Use this printer" counts. An auto-detected
+  // match is a proposal, not a confirmation — it names a model, which
+  // isn't a promise about bed size or temperature limits on a machine
+  // that may have been modified. The backend enforces the same rule, so
+  // this isn't the only thing standing between a guess and the hardware.
+  const isProfileConfigured = profile.source === "manual";
 
   const [homing, setHoming] = useState(false);
   const handleHome = async () => {
@@ -145,13 +150,27 @@ export function ControlPanel({
       {!isProfileConfigured ? (
         <div className="absolute inset-0 z-10 flex animate-fade flex-col items-center justify-center gap-2 rounded-lg bg-background/40 text-center backdrop-blur-[2px]">
           <Lock className="size-5 animate-pop text-muted-foreground" />
-          <p className="max-w-56 text-xs text-muted-foreground">
-            Choose your printer in Settings before controlling it
-          </p>
+          {/* An auto-detected printer is named here rather than hidden
+              behind a generic prompt: the point of the gate is to ask a
+              human "is this actually your machine?", and they can't
+              answer that without being told what was guessed. */}
+          {profile.source === "auto" && profile.printerName ? (
+            <p className="max-w-64 text-xs text-muted-foreground">
+              This looks like a{" "}
+              <span className="font-medium text-foreground">
+                {profile.printerName}
+              </span>
+              . Confirm it in Settings before controlling the printer.
+            </p>
+          ) : (
+            <p className="max-w-56 text-xs text-muted-foreground">
+              Choose your printer in Settings before controlling it
+            </p>
+          )}
           <Button asChild size="sm" variant="secondary">
             <Link to="/settings">
               <SettingsIcon className="size-3.5" />
-              Choose printer
+              {profile.source === "auto" ? "Confirm printer" : "Choose printer"}
             </Link>
           </Button>
         </div>

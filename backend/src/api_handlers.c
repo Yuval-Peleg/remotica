@@ -118,15 +118,26 @@ static int print_is_active(PrinterState *state) {
     return active;
 }
 
-/* True once a human has confirmed the printer's physical profile — either
- * directly in Settings, or indirectly via a successful firmware
- * auto-match (see main.c's try_auto_detect_profile). False means the
- * profile is still on hardcoded defaults, which are a plausible-looking
- * guess, not a fact about the printer actually attached — sending real
- * jog/home/print commands against made-up bed/Z limits risks crashing
- * into a frame those numbers don't actually describe. */
+/* True only once a HUMAN has confirmed the printer's physical profile in
+ * Settings. Neither the hardcoded defaults nor a successful firmware
+ * auto-match counts.
+ *
+ * Auto-match used to count (2026-08-01 to 2026-08-08), which meant a
+ * printer recognised from its M115 reply silently unlocked jog, home and
+ * print-start with nobody having agreed that the identification was
+ * right. That is the wrong default for something that drives heaters and
+ * motors: printer_database_match_firmware() matches a model NAME, and a
+ * name is not a promise about bed size, Z height or temperature limits —
+ * a modified or mis-flashed machine reports the same string as a stock
+ * one. Being wrong here means driving the head into a frame that isn't
+ * shaped the way these numbers claim.
+ *
+ * So an auto-match is now a proposal, not a decision: it pre-fills
+ * Settings so confirming is one click, and PRINTER_PROFILE_SOURCE_MANUAL
+ * — set only by POST /api/profile, i.e. only by someone pressing the
+ * button — is what actually unlocks physical control. */
 static int profile_is_configured(const PrinterProfile *profile) {
-    return profile->source != PRINTER_PROFILE_SOURCE_DEFAULT;
+    return profile->source == PRINTER_PROFILE_SOURCE_MANUAL;
 }
 
 /* Reads the "filename" query string parameter (e.g. from
