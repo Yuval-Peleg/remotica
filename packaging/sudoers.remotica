@@ -1,0 +1,15 @@
+# Lets the unprivileged "remotica" service user change one thing about
+# the machine: whether Remotica starts at boot. That toggle lives on the
+# dashboard's System page, so it has to be reachable from the running
+# service, which must not itself be root.
+#
+# Three exact command lines, absolute paths, no wildcards, no argument
+# freedom. `sudo systemctl enable anything-else`, `sudo rm`, or even
+# `sudo systemctl enable remotica.service --now` are all refused.
+#
+# Installed by packaging/install.sh, which validates it with
+# `visudo -c` BEFORE moving it into /etc/sudoers.d/ — a malformed file
+# there can lock the whole machine out of sudo.
+#
+# Removed by remotica-uninstall.
+remotica ALL=(root) NOPASSWD: /usr/bin/systemctl enable remotica.service, /usr/bin/systemctl disable remotica.service, /usr/bin/systemctl is-enabled remotica.service

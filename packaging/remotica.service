@@ -1,0 +1,43 @@
+[Unit]
+Description=Remotica 3D printer dashboard
+Documentation=https://github.com/Yuval-Peleg/remotica
+After=network.target
+
+[Service]
+Type=simple
+User=remotica
+Group=remotica
+
+# --serial auto rather than a fixed device path: a printer that gets
+# unplugged and replugged can come back as a different /dev/ttyACM*, and
+# an exact path would then be wrong forever. See transport_serial.c's
+# transport_serial_create_auto().
+ExecStart=/usr/local/bin/remotica --serial auto --web-root /usr/local/share/remotica/web --data-dir /var/lib/remotica
+
+# Covers a crash, and nothing else. Notably this does NOT paper over "no
+# printer attached" — the backend starts fine with none and retries in
+# the background, so a missing printer never reaches systemd as a
+# failure in the first place.
+Restart=on-failure
+RestartSec=5
+
+# The service only ever needs to read its own web root and write its own
+# data directory, so the rest of the filesystem is taken away from it.
+# Serial devices still work: they live under /dev, which these do not
+# restrict.
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/remotica
+
+# Deliberately false, not an oversight: the System page's start-on-boot
+# toggle works by running sudo systemctl, and sudo cannot escalate at all
+# under NoNewPrivileges=true. What stops that being a general grant of
+# root is /etc/sudoers.d/remotica, which permits exactly three systemctl
+# command lines against exactly this unit and nothing else.
+#
+# If the boot-start toggle is ever dropped, flip this to true.
+NoNewPrivileges=false
+
+[Install]
+WantedBy=multi-user.target
