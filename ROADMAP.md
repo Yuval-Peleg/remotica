@@ -86,13 +86,23 @@ progress when the backend last died — the job state simply starts fresh.
 
 ## Detecting a printer going away mid-session
 
-The reconnect thread added 2026-08-01 covers "no printer at startup, plug
-one in later" — but nothing currently notices a printer that was connected
-going away mid-session (e.g. the USB cable is physically unplugged, or the
-printer loses power) and reflects that back as disconnected. `state->connected`
-is only ever set by `serial_connect()`/`serial_disconnect()` today; a
-failed mid-session read/write (e.g. during the M105 temperature poll) is
-silently ignored rather than tripping a reconnect.
+**Fixed 2026-08-08.** `state->connected` used to be written only by
+`serial_connect()`/`serial_disconnect()`, so a printer that vanished
+mid-session — unplugged cable, power cut — left the dashboard reporting
+"Connected" with frozen numbers indefinitely. `serial_tick()` now treats
+a failed temperature poll as evidence: a write that fails means the
+device is gone (a yanked cable gives EIO immediately) and disconnects at
+once, while three consecutive missing replies are needed before giving up
+on a printer that might merely be busy. Skipped polls don't count, since
+during a print nearly every poll is skipped by the trylock. Clearing
+`connected` is enough for main.c's reconnect thread to take over, which
+re-scans for `--serial auto` in case the printer comes back on a
+different device node. Covered by `fake_marlin_test.py` scenario F.
+
+**Still open:** detection only happens on the temperature poll. A printer
+that goes away *during* a print is caught by the streamer's send failing
+(which aborts the print), but `connected` isn't cleared until the poll
+next runs and fails.
 
 ## No authentication on the LAN
 

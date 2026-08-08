@@ -477,8 +477,11 @@ class Session:
             print("  --- backend stdout/stderr (last 20 lines) ---")
             for l in out.strip().splitlines()[-20:]:
                 print("   ", l)
-        os.close(self.master_fd)
-        os.close(self.slave_fd)
+        for fd in (self.master_fd, self.slave_fd):
+            try:
+                os.close(fd)
+            except OSError:
+                pass  # scenario F closes the master itself, on purpose
         shutil.rmtree(self.workdir, ignore_errors=True)
         return False
 
@@ -612,6 +615,58 @@ def scenario_live_temperature():
             return False
 
         print(f"  OK: reading tracked live during the print (saw {best:.1f}C)")
+        print(f"  PASS: {label}")
+        return True
+
+
+def scenario_disconnect_detected():
+    """Scenario F: unplugging the printer must be noticed.
+
+    Reported 2026-08-08: state->connected was only ever written by
+    connect() and disconnect(), so a printer that vanished mid-session
+    left the dashboard reporting "Connected" with frozen numbers forever.
+
+    Closing the pty master is the closest thing to yanking the USB cable
+    that doesn't need hardware: the backend's end of the port starts
+    failing exactly as it would for a real unplug.
+    """
+    label = "F: a printer that goes away is noticed"
+    print(f"\n=== Scenario: {label} ===")
+
+    with Session(respond_to_m110=True) as s:
+        if not wait_for_backend_ready():
+            print("  FAIL: backend never became reachable over HTTP")
+            return False
+        if not wait_for_connected():
+            print("  FAIL: driver did not report connected")
+            return False
+        print("  OK: connected to begin with")
+
+        # Yank the cable.
+        s.fw.stop()
+        try:
+            os.close(s.master_fd)
+        except OSError:
+            pass
+        s.master_fd = -1
+
+        deadline = time.time() + 40
+        noticed = False
+        while time.time() < deadline:
+            try:
+                _, body = http_get("/api/state")
+                if not json.loads(body)["connected"]:
+                    noticed = True
+                    break
+            except Exception:
+                pass
+            time.sleep(0.5)
+
+        if not noticed:
+            print("  FAIL: still reporting connected 40s after the port went away")
+            return False
+
+        print("  OK: reported disconnected after the port went away")
         print(f"  PASS: {label}")
         return True
 
@@ -765,6 +820,7 @@ if __name__ == "__main__":
     if "C" in wanted:
         results.append(("C: slow move + busy keepalives", scenario_busy_keepalive()))
         results.append(("E: live temperature during a print", scenario_live_temperature()))
+        results.append(("F: disconnect is detected", scenario_disconnect_detected()))
     if "D" in wanted:
         results.append(("D: abort-safety actually reaches the printer", scenario_abort_safety()))
 

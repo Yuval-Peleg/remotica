@@ -143,6 +143,16 @@ static const struct {
  * faster than necessary — about once every ~1.8 seconds. */
 #define TEMP_POLL_EVERY_N_TICKS 6
 
+/* Consecutive failed temperature polls before the printer is declared
+ * gone. Each failed poll costs up to TIMEOUT_MS_NORMAL, so three is on
+ * the order of fifteen seconds — long enough that a printer briefly too
+ * busy to answer isn't dropped, short enough that a yanked USB cable
+ * shows up on the dashboard while the user is still standing there
+ * wondering why nothing is happening. Polls skipped because the port was
+ * busy do NOT count: those aren't failures, and during a print almost
+ * every poll is skipped. */
+#define POLL_FAILURES_BEFORE_DISCONNECT 3
+
 /* This driver's private data — only the functions in this file ever look
  * inside this struct (see the `void *impl_data` comment in transport.h). */
 typedef struct {
@@ -170,7 +180,8 @@ typedef struct {
      * by construction. */
     pthread_mutex_t io_lock;
 
-    int ticks_since_poll; /* counts up to TEMP_POLL_EVERY_N_TICKS */
+    int ticks_since_poll;       /* counts up to TEMP_POLL_EVERY_N_TICKS */
+    int consecutive_poll_fails; /* counts up to POLL_FAILURES_BEFORE_DISCONNECT */
 
     /* Temperatures scraped out of reply lines while streaming a print.
      *
@@ -1314,6 +1325,44 @@ static int serial_set_target_temp(PrinterDriver *self, PrinterHeater heater, dou
     return 0;
 }
 
+/* Declares the printer gone: closes the port and clears connected, which
+ * is what main.c's reconnect thread watches — it will start retrying (and
+ * for --serial auto, re-scanning, since the printer may come back on a
+ * different /dev/ttyACM*) without anything else being asked to notice.
+ *
+ * Until this existed, a printer that vanished mid-session — unplugged
+ * cable, power cut — left the dashboard reporting "Connected" with frozen
+ * numbers indefinitely, because state->connected was only ever written by
+ * connect() and disconnect().
+ *
+ * MUST be called with io_lock held; releases it before touching state,
+ * per this file's lock-ordering rule. */
+static void mark_printer_gone(PrinterDriver *self, const char *reason) {
+    SerialImplData *impl = (SerialImplData *)self->impl_data;
+
+    if (impl->fd >= 0) {
+        close(impl->fd);
+        impl->fd = -1;
+    }
+    impl->consecutive_poll_fails = 0;
+    /* The next connection starts a fresh conversation, so none of the
+     * old protocol state carries over. */
+    impl->checksums_enabled = 0;
+    impl->next_line_number = 1;
+    impl->needs_line_number_resync = 0;
+    impl->pending_temps = 0;
+
+    pthread_mutex_unlock(&impl->io_lock);
+
+    printer_state_lock(self->state);
+    self->state->connected = 0;
+    self->state->homed = 0; /* whatever comes back has not been homed */
+    printer_state_unlock(self->state);
+
+    printf("Lost the printer (%s). Retrying in the background.\n", reason);
+    fflush(stdout);
+}
+
 static void serial_tick(PrinterDriver *self) {
     SerialImplData *impl = (SerialImplData *)self->impl_data;
 
@@ -1357,7 +1406,12 @@ static void serial_tick(PrinterDriver *self) {
      * leave the real "ok" in the buffer to be mistaken for the
      * acknowledgement of whatever command goes out next. */
     if (write_line(impl->fd, "M105", self->console) != 0) {
-        pthread_mutex_unlock(&impl->io_lock);
+        /* Not counted towards the failure threshold like a missing reply
+         * is: writing to a port that's still there essentially doesn't
+         * fail, so this already means the device has gone (a yanked USB
+         * cable gives EIO immediately). Waiting for three of these would
+         * just delay the news. */
+        mark_printer_gone(self, "the serial port stopped accepting writes");
         return;
     }
 
@@ -1396,8 +1450,15 @@ static void serial_tick(PrinterDriver *self) {
         }
     }
 
-    if (!saw_ok) {
+    if (saw_ok) {
+        impl->consecutive_poll_fails = 0;
+    } else {
         tcflush(impl->fd, TCIFLUSH); /* same resync reasoning as send_and_wait_for_ok */
+        impl->consecutive_poll_fails++;
+        if (impl->consecutive_poll_fails >= POLL_FAILURES_BEFORE_DISCONNECT) {
+            mark_printer_gone(self, "it stopped answering");
+            return; /* io_lock already released, and there are no temps */
+        }
     }
     pthread_mutex_unlock(&impl->io_lock);
 
