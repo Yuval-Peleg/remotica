@@ -41,6 +41,7 @@
 #include <signal.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "api_handlers.h"
@@ -220,18 +221,35 @@ static void *reconnect_thread_main(void *arg) {
  * being broken. Serving index.html instead lets the router take over on
  * the client and render the right page.
  *
- * Registered on "/", which civetweb only reaches after every more
- * specific handler and every real file under document_root have been
- * tried — so this cannot shadow a route or a real asset. The explicit
- * /api/ check is belt-and-braces for the same thing: returning 0 hands
- * the request back to civetweb rather than answering it, so a mistyped
- * API path still 404s as JSON-shaped nothing instead of quietly
- * returning an HTML page to something expecting JSON. */
+ * Returning 0 hands the request back to civetweb untouched; returning 1
+ * means "answered". Both escape hatches below are load-bearing:
+ *
+ *   - /api/ so a mistyped API path 404s instead of quietly handing an
+ *     HTML page to something expecting JSON.
+ *
+ *   - Real files, because civetweb resolves REGISTERED HANDLERS BEFORE
+ *     STATIC FILES (see get_request_handler, called at the top of
+ *     handle_request in civetweb.c). A handler on "/" therefore matches
+ *     every request, assets included. Without the stat() check this
+ *     returned index.html for the bundled JS under /assets/, with
+ *     Content-Type text/html,
+ *     and browsers refuse to execute a module script served as HTML — so
+ *     the dashboard came up as a blank white page with no error visible
+ *     anywhere server-side. Found by screenshotting the built frontend;
+ *     every curl of the HTML looked perfectly fine. */
 static int spa_fallback_handler(struct mg_connection *conn, void *cbdata) {
     const char *root = (const char *)cbdata;
     const struct mg_request_info *req_info = mg_get_request_info(conn);
 
     if (req_info->local_uri == NULL || strncmp(req_info->local_uri, "/api/", 5) == 0) {
+        return 0;
+    }
+
+    char candidate[512];
+    snprintf(candidate, sizeof(candidate), "%s%s", root, req_info->local_uri);
+
+    struct stat st;
+    if (stat(candidate, &st) == 0 && S_ISREG(st.st_mode)) {
         return 0;
     }
 
