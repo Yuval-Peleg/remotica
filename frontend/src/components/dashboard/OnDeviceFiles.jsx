@@ -55,7 +55,10 @@ function FileRow({ file, isSelected, disabled, onSelect, onDelete }) {
           )}
         </div>
         <div className="min-w-0 flex-1">
-          <p className="truncate text-sm font-medium text-foreground">
+          <p
+            className="truncate text-sm font-medium text-foreground"
+            title={file.filename}
+          >
             {file.filename}
           </p>
           <p className="text-xs text-muted-foreground">

@@ -51,11 +51,20 @@ const JOB_STATUS_LABELS = {
   paused: "Paused",
 };
 
-function StatRow({ label, value }) {
+// `title` is what a long value falls back to on hover, since the value
+// itself is truncated to one line — gcode filenames off a slicer are
+// routinely long enough ("CE3_bracket_v4_0.2mm_PLA_MK3S_4h12m.gcode") to
+// otherwise blow the row's layout apart.
+function StatRow({ label, value, title }) {
   return (
-    <div className="flex items-center justify-between py-1.5 text-sm">
-      <span className="text-muted-foreground">{label}</span>
-      <span className="font-medium text-foreground">{value}</span>
+    <div className="flex items-center justify-between gap-3 py-1.5 text-sm">
+      <span className="shrink-0 text-muted-foreground">{label}</span>
+      <span
+        className="min-w-0 truncate font-medium text-foreground"
+        title={title}
+      >
+        {value}
+      </span>
     </div>
   );
 }
@@ -205,7 +214,11 @@ export function Dashboard() {
               >
                 <div className="overflow-hidden">
                   <Separator />
-                  <StatRow label="File" value={fileLabel} />
+                  <StatRow
+                    label="File"
+                    value={fileLabel}
+                    title={hasFile ? job.filename : undefined}
+                  />
                   <StatRow label="Print time" value={printTime} />
                   <StatRow label="Time left" value={printTimeLeft} />
 
@@ -273,7 +286,10 @@ export function Dashboard() {
           <DialogHeader className="items-center text-center">
             <CheckCircle2 className="size-12 animate-pop text-primary" />
             <DialogTitle className="text-lg">Print finished</DialogTitle>
-            <DialogDescription>
+            {/* Wrapped rather than truncated: this is a one-off dialog
+                with room to spare, and a filename is the only thing
+                identifying which print just finished. */}
+            <DialogDescription className="break-words">
               {fileLabel} finished printing.
             </DialogDescription>
           </DialogHeader>
