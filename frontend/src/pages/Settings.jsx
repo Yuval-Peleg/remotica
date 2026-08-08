@@ -1,10 +1,25 @@
 import { useEffect, useRef, useState } from "react";
-import { Check, PencilLine, Search, Sparkles } from "lucide-react";
+import {
+  Check,
+  PencilLine,
+  Search,
+  Sparkles,
+  TriangleAlert,
+} from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Separator } from "@/components/ui/separator";
+import { Textarea } from "@/components/ui/textarea";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   Select,
   SelectContent,
@@ -18,6 +33,7 @@ import {
 import { ConnectionStatus } from "@/components/dashboard/ConnectionStatus";
 import { usePrinterState } from "@/hooks/use-printer-state";
 import { api } from "@/lib/api";
+import { validateGcode } from "@/lib/gcode-validate";
 
 const FIELDS = [
   { key: "bedWidthMm", label: "Bed width", unit: "mm" },
@@ -72,6 +88,15 @@ export function Settings() {
   const [manualForm, setManualForm] = useState(null);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+
+  // Start/end G-code. Loaded and saved independently of the profile —
+  // see backend/src/gcode_snippets.h for why they're kept apart.
+  const [snippets, setSnippets] = useState(null);
+  const [snippetsSaving, setSnippetsSaving] = useState(false);
+  const [snippetsSaved, setSnippetsSaved] = useState(false);
+  const [snippetsError, setSnippetsError] = useState(null);
+  // The profile change being held back by the printer-change dialog.
+  const [pendingProfile, setPendingProfile] = useState(null);
   const [error, setError] = useState(null);
 
   useEffect(() => {
@@ -161,6 +186,67 @@ export function Settings() {
     setManualForm((prev) => ({ ...prev, [key]: value }));
   };
 
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .getSnippets()
+      .then((data) => !cancelled && setSnippets(data))
+      .catch(
+        () =>
+          !cancelled &&
+          setSnippets({ startGcode: "", endGcode: "", writtenFor: "" })
+      );
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const startWarnings = validateGcode(snippets?.startGcode ?? "", {
+    position: "start",
+  });
+  const endWarnings = validateGcode(snippets?.endGcode ?? "", {
+    position: "end",
+  });
+  const hasSnippets = Boolean(
+    snippets?.startGcode?.trim() || snippets?.endGcode?.trim()
+  );
+
+  const saveSnippets = async (next) => {
+    setSnippetsSaving(true);
+    setSnippetsError(null);
+    try {
+      setSnippets(await api.setSnippets(next));
+      setSnippetsSaved(true);
+      setTimeout(() => setSnippetsSaved(false), 2000);
+    } catch (err) {
+      setSnippetsError(err.message || "Couldn't save the G-code.");
+    } finally {
+      setSnippetsSaving(false);
+    }
+  };
+
+  // Applies a profile payload for real. Split out from handleSave so the
+  // printer-change dialog can call it after the user has acknowledged
+  // that their snippets were written for a different machine.
+  const applyProfile = async (payload) => {
+    setSaving(true);
+    setError(null);
+    try {
+      setProfile(await api.setProfile(payload));
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+      // Snippets follow the printer they were checked against, so the
+      // warning doesn't fire again for a change already acknowledged.
+      if (snippets && snippets.writtenFor !== payload.printerName) {
+        await saveSnippets({ ...snippets, writtenFor: payload.printerName });
+      }
+    } catch {
+      setError("Couldn't save the profile — is the backend running?");
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const handleSave = async () => {
     let payload;
     if (isManual) {
@@ -183,17 +269,19 @@ export function Settings() {
       return;
     }
 
-    setSaving(true);
-    setError(null);
-    try {
-      setProfile(await api.setProfile(payload));
-      setSaved(true);
-      setTimeout(() => setSaved(false), 2000);
-    } catch {
-      setError("Couldn't save the profile — is the backend running?");
-    } finally {
-      setSaving(false);
+    // Blocking, not advisory: start G-code that homes or heats correctly
+    // for one machine can be actively wrong on another, and the moment
+    // the user causes the change is the right moment to ask.
+    if (
+      hasSnippets &&
+      snippets.writtenFor &&
+      snippets.writtenFor !== payload.printerName
+    ) {
+      setPendingProfile(payload);
+      return;
     }
+
+    await applyProfile(payload);
   };
 
   const inUseLabel = !profile
@@ -440,6 +528,158 @@ export function Settings() {
           )}
         </CardContent>
       </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Start &amp; end G-code</CardTitle>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-5">
+          <p className="text-sm text-muted-foreground">
+            Runs before and after every print, around the sliced file&apos;s own
+            start and end blocks. Test it with the printer in front of you.
+          </p>
+
+          {snippets?.writtenFor &&
+            profile?.printerName &&
+            snippets.writtenFor !== profile.printerName && (
+              <Alert className="animate-pop border-amber-500/40 bg-amber-500/10">
+                <TriangleAlert className="size-4 text-amber-400" />
+                <AlertDescription className="text-amber-200">
+                  This G-code was written for {snippets.writtenFor}, not{" "}
+                  {profile.printerName}. Check it before printing.
+                </AlertDescription>
+              </Alert>
+            )}
+
+          <SnippetField
+            label="Before every print"
+            value={snippets?.startGcode ?? ""}
+            warnings={startWarnings}
+            disabled={snippets === null}
+            onChange={(value) =>
+              setSnippets((prev) => ({ ...prev, startGcode: value }))
+            }
+          />
+
+          <SnippetField
+            label="After every print"
+            value={snippets?.endGcode ?? ""}
+            warnings={endWarnings}
+            disabled={snippets === null}
+            onChange={(value) =>
+              setSnippets((prev) => ({ ...prev, endGcode: value }))
+            }
+          />
+
+          {snippetsError && (
+            <Alert variant="destructive" className="animate-pop">
+              <AlertDescription>{snippetsError}</AlertDescription>
+            </Alert>
+          )}
+
+          <div className="flex items-center gap-3">
+            <Button
+              variant="secondary"
+              disabled={snippets === null || snippetsSaving}
+              onClick={() =>
+                saveSnippets({
+                  ...snippets,
+                  writtenFor: profile?.printerName ?? "",
+                })
+              }
+            >
+              {snippetsSaving ? "Saving..." : "Save G-code"}
+            </Button>
+            {snippetsSaved && (
+              <span className="flex animate-pop items-center gap-1 text-sm text-primary">
+                <Check className="size-4" />
+                Saved
+              </span>
+            )}
+          </div>
+        </CardContent>
+      </Card>
+
+      <Dialog
+        open={pendingProfile !== null}
+        onOpenChange={(open) => !open && setPendingProfile(null)}
+      >
+        <DialogContent
+          className="sm:max-w-md"
+          onInteractOutside={(e) => e.preventDefault()}
+        >
+          <DialogHeader>
+            <DialogTitle>
+              Your G-code was written for {snippets?.writtenFor}
+            </DialogTitle>
+            <DialogDescription>
+              You&apos;re switching to {pendingProfile?.printerName}. Start
+              G-code that homes or heats correctly for one machine can be wrong
+              on another — it runs before every print.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-2 sm:gap-2">
+            <Button variant="secondary" onClick={() => setPendingProfile(null)}>
+              Review G-code
+            </Button>
+            <Button
+              onClick={() => {
+                const payload = pendingProfile;
+                setPendingProfile(null);
+                applyProfile(payload);
+              }}
+            >
+              I&apos;ve checked — switch anyway
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </main>
+  );
+}
+
+// One labelled G-code box plus its warnings. Warnings are advisory only —
+// nothing here can prevent saving; see lib/gcode-validate.js.
+function SnippetField({ label, value, warnings, disabled, onChange }) {
+  return (
+    <div className="flex flex-col gap-1.5">
+      <div className="flex items-baseline justify-between gap-3">
+        <label className="text-xs font-medium text-muted-foreground">
+          {label}
+        </label>
+        {value.length > 1500 && (
+          <span className="text-xs tabular-nums text-muted-foreground">
+            {value.length} / 2047
+          </span>
+        )}
+      </div>
+      <Textarea
+        value={value}
+        disabled={disabled}
+        onChange={(e) => onChange(e.target.value)}
+        rows={5}
+        spellCheck={false}
+        placeholder="; one command per line"
+        className="font-mono text-xs"
+      />
+      {warnings.length > 0 && (
+        <ul className="flex flex-col gap-1 pt-0.5">
+          {warnings.map((warning, index) => (
+            <li
+              key={`${warning.line}-${index}`}
+              className="flex items-start gap-1.5 text-xs text-amber-400"
+            >
+              <TriangleAlert className="mt-0.5 size-3 shrink-0" />
+              <span>
+                {warning.line != null && (
+                  <span className="font-medium">Line {warning.line}: </span>
+                )}
+                {warning.message}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }

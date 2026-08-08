@@ -54,6 +54,11 @@ export const api = {
   // and whether this is an installed systemd service. `managed` is false
   // in a dev checkout, where there's no service to change; setBootStart
   // 409s in that case rather than pretending to work.
+  // Start/end G-code that runs around every print. Its own endpoint
+  // rather than part of the profile — see backend/src/gcode_snippets.h.
+  getSnippets: () => requestJson("/api/gcode-snippets"),
+  setSnippets: (snippets) => postJson("/api/gcode-snippets", snippets),
+
   getSystem: () => requestJson("/api/system"),
   setBootStart: (enabled) => postJson("/api/system/boot-start", { enabled }),
 
