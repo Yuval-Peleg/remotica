@@ -47,6 +47,10 @@ typedef struct {
     PrinterState *state;
     PrinterDriver *driver;
     char path[512];
+    /* A copy, not a pointer into AppContext: the user can save new
+     * snippets from Settings while a print is running, and this thread
+     * must not read a buffer being rewritten underneath it. */
+    GcodeSnippets snippets;
 } StreamerArgs;
 
 /* Checks that `filename` is safe to use as-is inside a file path we
@@ -215,6 +219,42 @@ static void send_abort_safety_sequence(PrinterDriver *driver) {
     }
 }
 
+/* Sends each real line of a user-written snippet, reusing the same
+ * blank/comment stripping the file loop uses so the two behave
+ * identically. Returns 0 if everything was acknowledged, -1 on the first
+ * line the printer didn't take.
+ *
+ * A failing snippet line is deliberately as fatal as a failing file line:
+ * these are ordinary G-code going to real hardware, and silently skipping
+ * one could leave the printer in a state the rest of the print assumes it
+ * isn't in. */
+static int send_snippet(PrinterDriver *driver, const char *text) {
+    char buffer[GCODE_LINE_BUF_SIZE];
+    const char *cursor = text;
+
+    while (*cursor != '\0') {
+        const char *newline = strchr(cursor, '\n');
+        size_t length = (newline != NULL) ? (size_t)(newline - cursor) : strlen(cursor);
+        if (length >= sizeof(buffer)) {
+            length = sizeof(buffer) - 1;
+        }
+        memcpy(buffer, cursor, length);
+        buffer[length] = '\0';
+
+        char *line = strip_gcode_line(buffer);
+        if (line != NULL && driver->send_gcode_line(driver, line) != 0) {
+            return -1;
+        }
+
+        if (newline == NULL) {
+            break;
+        }
+        cursor = newline + 1;
+    }
+
+    return 0;
+}
+
 /* The body of the print-streaming background thread launched by
  * job_manager_start_print(). Reads `args->path` line by line and hands
  * each real gcode line to the driver, tracking progress on `args->state`
@@ -245,7 +285,19 @@ static void *streamer_thread_main(void *arg) {
     AbortReason abort_reason = ABORT_NONE;
     char raw_line[GCODE_LINE_BUF_SIZE];
 
-    while (fgets(raw_line, sizeof(raw_line), file) != NULL) {
+    /* Before the file, not after its opening lines: a sliced file carries
+     * its own start block (heat, home, prime line), and the user's
+     * snippet is meant to precede all of that.
+     *
+     * These lines are deliberately NOT counted in total_lines — progress
+     * describes the file being printed, and padding the denominator with
+     * lines the user didn't slice would make the estimate worse. Progress
+     * therefore sits at 0% for the duration of the start snippet. */
+    if (send_snippet(driver, args->snippets.start_gcode) != 0) {
+        abort_reason = ABORT_DRIVER_FAILURE;
+    }
+
+    while (abort_reason == ABORT_NONE && fgets(raw_line, sizeof(raw_line), file) != NULL) {
         char *line = strip_gcode_line(raw_line);
         if (line == NULL) {
             continue; /* blank or comment-only — never sent to the printer */
@@ -309,6 +361,16 @@ static void *streamer_thread_main(void *arg) {
     if (abort_reason != ABORT_NONE) {
         /* Stopped early, one way or another — don't leave the printer
          * cooking the part it was half-way through. */
+        send_abort_safety_sequence(driver);
+    }
+
+    /* Only on a clean finish. A cancel or a driver failure keeps the fixed
+     * safety sequence above and nothing else: that path already failed
+     * once by leaving the heaters at temperature for 20+ minutes, and it
+     * stays short and predictable rather than gaining arbitrary user
+     * commands at the worst possible moment. */
+    if (abort_reason == ABORT_NONE && send_snippet(driver, args->snippets.end_gcode) != 0) {
+        abort_reason = ABORT_DRIVER_FAILURE;
         send_abort_safety_sequence(driver);
     }
 
@@ -403,7 +465,8 @@ int job_manager_save_upload(PrinterState *state, const char *uploads_dir, const 
     return 0;
 }
 
-int job_manager_start_print(PrinterState *state, PrinterDriver *driver, const char *uploads_dir) {
+int job_manager_start_print(PrinterState *state, PrinterDriver *driver, const char *uploads_dir,
+                            const GcodeSnippets *snippets) {
     /* The READY -> PRINTING transition happens here, in one locked step,
      * rather than further down once everything else has succeeded. Two
      * "Start" requests arriving together (an impatient double-click is
@@ -451,6 +514,7 @@ int job_manager_start_print(PrinterState *state, PrinterDriver *driver, const ch
     }
     args->state = state;
     args->driver = driver;
+    args->snippets = *snippets;
     strncpy(args->path, path, sizeof(args->path) - 1);
     args->path[sizeof(args->path) - 1] = '\0';
 

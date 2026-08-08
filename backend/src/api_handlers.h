@@ -19,6 +19,7 @@
 
 #include <time.h>
 
+#include "gcode_snippets.h"
 #include "job_manager.h"
 #include "printer_profile.h"
 #include "printer_state.h"
@@ -39,6 +40,11 @@ typedef struct {
     const char *data_dir;      /* what free space is reported against */
     const char *serial_device; /* NULL means the simulator */
     time_t started_at;         /* for uptime */
+
+    /* Start/end G-code that runs around a print. Kept out of
+     * PrinterProfile on purpose — see gcode_snippets.h. */
+    GcodeSnippets *snippets;
+    const char *snippets_path;
 } AppContext;
 
 struct mg_context;

@@ -27,6 +27,7 @@
 
 #include <stddef.h>
 
+#include "gcode_snippets.h"
 #include "printer_state.h"
 #include "transport.h"
 
@@ -58,7 +59,8 @@ int job_manager_save_upload(PrinterState *state, const char *uploads_dir, const 
  * line by line. Returns 0 on success, -1 if there's no file queued
  * (state->job.status isn't JOB_STATUS_READY), the file doesn't actually
  * exist on disk, or the thread couldn't be created. */
-int job_manager_start_print(PrinterState *state, PrinterDriver *driver, const char *uploads_dir);
+int job_manager_start_print(PrinterState *state, PrinterDriver *driver, const char *uploads_dir,
+                            const GcodeSnippets *snippets);
 
 /* Stops printing and fully clears the queued job (status becomes
  * JOB_STATUS_IDLE, filename is cleared, progress resets to 0) — this

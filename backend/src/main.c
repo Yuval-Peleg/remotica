@@ -48,6 +48,7 @@
 #include "camera.h"
 #include "civetweb.h"
 #include "console_log.h"
+#include "gcode_snippets.h"
 #include "job_manager.h"
 #include "printer_database.h"
 #include "printer_profile.h"
@@ -74,6 +75,7 @@
 #define DEFAULT_DATA_DIR "data"
 #define PROFILE_FILENAME "profile.json"
 #define UPLOADS_SUBDIR "uploads"
+#define SNIPPETS_FILENAME "snippets.json"
 
 /* How often the background tick thread wakes up to advance the
  * simulation/poll the real printer and broadcast state. 300ms is
@@ -345,8 +347,10 @@ int main(int argc, char **argv) {
 
     char profile_path[512];
     char uploads_dir[512];
+    char snippets_path[512];
     snprintf(profile_path, sizeof(profile_path), "%s/%s", data_dir, PROFILE_FILENAME);
     snprintf(uploads_dir, sizeof(uploads_dir), "%s/%s", data_dir, UPLOADS_SUBDIR);
+    snprintf(snippets_path, sizeof(snippets_path), "%s/%s", data_dir, SNIPPETS_FILENAME);
 
     signal(SIGINT, handle_stop_signal);
     signal(SIGTERM, handle_stop_signal);
@@ -358,6 +362,9 @@ int main(int argc, char **argv) {
 
     PrinterProfile profile;
     printer_profile_load(&profile, profile_path);
+
+    GcodeSnippets snippets;
+    gcode_snippets_load(&snippets, snippets_path);
 
     ConsoleLog console;
     console_log_init(&console);
@@ -539,6 +546,8 @@ int main(int argc, char **argv) {
         .data_dir = data_dir,
         .serial_device = serial_device,
         .started_at = started_at,
+        .snippets = &snippets,
+        .snippets_path = snippets_path,
     };
     api_handlers_register_all(ctx, &app_context);
 

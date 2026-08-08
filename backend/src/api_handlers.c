@@ -663,7 +663,7 @@ static int print_start_handler(struct mg_connection *conn, void *cbdata) {
         return 1;
     }
 
-    if (job_manager_start_print(ctx->state, ctx->driver, ctx->uploads_dir) != 0) {
+    if (job_manager_start_print(ctx->state, ctx->driver, ctx->uploads_dir, ctx->snippets) != 0) {
         mg_send_http_error(conn, 409, "No file ready to print");
         return 1;
     }
@@ -857,6 +857,61 @@ static int files_delete_handler(struct mg_connection *conn, void *cbdata) {
 }
 
 /* ---------------------------------------------------------------------
+ * GET + POST /api/gcode-snippets
+ *
+ * Start/end G-code that runs around every print. Deliberately its own
+ * endpoint rather than fields on /api/profile — see gcode_snippets.h.
+ * --------------------------------------------------------------------- */
+
+static int snippets_handler(struct mg_connection *conn, void *cbdata) {
+    AppContext *ctx = (AppContext *)cbdata;
+    const struct mg_request_info *req_info = mg_get_request_info(conn);
+
+    if (strcmp(req_info->request_method, "GET") == 0) {
+        send_json_and_delete(conn, (cJSON *)gcode_snippets_to_json(ctx->snippets));
+        return 1;
+    }
+
+    if (strcmp(req_info->request_method, "POST") != 0) {
+        mg_send_http_error(conn, 405, "Use GET or POST");
+        return 1;
+    }
+
+    cJSON *json = read_json_body(conn);
+    if (json == NULL) {
+        return 1;
+    }
+
+    /* Checked before anything is copied in, and named specifically:
+     * "too long" is useless when the user is looking at two boxes. */
+    const char *too_long = NULL;
+    cJSON *start_item = cJSON_GetObjectItemCaseSensitive(json, "startGcode");
+    cJSON *end_item = cJSON_GetObjectItemCaseSensitive(json, "endGcode");
+    if (cJSON_IsString(start_item) && strlen(start_item->valuestring) >= GCODE_SNIPPET_MAX) {
+        too_long = "start";
+    } else if (cJSON_IsString(end_item) && strlen(end_item->valuestring) >= GCODE_SNIPPET_MAX) {
+        too_long = "end";
+    }
+    if (too_long != NULL) {
+        cJSON_Delete(json);
+        mg_send_http_error(conn, 413, "The %s G-code is too long (limit %d characters)", too_long,
+                           GCODE_SNIPPET_MAX - 1);
+        return 1;
+    }
+
+    gcode_snippets_from_json(ctx->snippets, (const struct cJSON *)json);
+    cJSON_Delete(json);
+
+    if (gcode_snippets_save(ctx->snippets, ctx->snippets_path) != 0) {
+        mg_send_http_error(conn, 500, "Couldn't save the G-code snippets");
+        return 1;
+    }
+
+    send_json_and_delete(conn, (cJSON *)gcode_snippets_to_json(ctx->snippets));
+    return 1;
+}
+
+/* ---------------------------------------------------------------------
  * GET /api/system
  *
  * Host-level status, not printer status — what build is running, how
@@ -981,6 +1036,7 @@ void api_handlers_register_all(struct mg_context *ctx, AppContext *app_context) 
     mg_set_request_handler(ctx, "/api/files/content", files_content_handler, app_context);
     mg_set_request_handler(ctx, "/api/files/select", files_select_handler, app_context);
     mg_set_request_handler(ctx, "/api/files/delete", files_delete_handler, app_context);
+    mg_set_request_handler(ctx, "/api/gcode-snippets", snippets_handler, app_context);
     mg_set_request_handler(ctx, "/api/system", system_handler, app_context);
     mg_set_request_handler(ctx, "/api/system/boot-start", boot_start_handler, app_context);
 }
