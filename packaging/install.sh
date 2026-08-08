@@ -132,13 +132,14 @@ do_uninstall() {
 
     say ""
     if [ -d "$DATA_DIR" ]; then
-        say "Remotica is uninstalled. Your printer profile and uploaded gcode"
-        say "are still at $DATA_DIR — remove them with:"
+        say "  Remotica is uninstalled."
         say ""
-        say "    sudo rm -rf $DATA_DIR"
+        say "  Your profile and uploaded gcode are kept at $DATA_DIR"
+        say "  Remove them with:  sudo rm -rf $DATA_DIR"
         say ""
     else
-        say "Remotica is fully uninstalled."
+        say "  Remotica is fully uninstalled."
+        say ""
     fi
 
     rm -f "$UNINSTALL_PATH"
@@ -340,19 +341,21 @@ if [ "$READY" != 1 ]; then
 fi
 
 LAN_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+[ -n "$LAN_IP" ] || LAN_IP=localhost
+
+# The one thing anyone actually needs is the URL, so it goes first and
+# alone. Everything after it is reference material, kept to one line each
+# so the whole block can be taken in at a glance rather than read.
 say ""
-say "Remotica is running."
+say "  Remotica is running:  http://$LAN_IP:$PORT"
 say ""
-if [ -n "$LAN_IP" ]; then
-    say "    Open it from any device on your network:  http://$LAN_IP:$PORT"
-else
-    say "    Open it on this machine:  http://localhost:$PORT"
-fi
+say "  Open that from your phone or laptop. Confirm your printer in"
+say "  Settings, then home it, before the controls unlock."
 say ""
-say "  Anyone on your network who opens that URL can control your printer."
-say "  Remotica has no login of any kind. Only run it on a network you trust."
+say "  Status     systemctl status $UNIT_NAME"
+say "  Logs       journalctl -u $UNIT_NAME -f"
+say "  Uninstall  sudo remotica-uninstall"
 say ""
-say "  Status:     systemctl status $UNIT_NAME"
-say "  Logs:       journalctl -u $UNIT_NAME -f"
-say "  Uninstall:  sudo remotica-uninstall"
+say "  ! No login: anyone on your network can control your printer."
+say "  ! Do not leave it running an unattended print."
 say ""
